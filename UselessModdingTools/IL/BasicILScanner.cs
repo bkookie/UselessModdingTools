@@ -4,10 +4,13 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
 
 namespace UselessModdingTools.IL;
 
-public readonly record struct Instruction(OpCode OpCode, byte[] OperandIL, string? Text, int Position, int Depth, Branch? Branch, bool StackReset, bool IsExceptionHandlerLead);
+public readonly record struct Instruction(OpCode OpCode, byte[] OperandIL, int Push, int Pop, string? Text, int Position, int Depth, Branch? Branch, bool StackReset, bool IsExceptionHandlerLead);
 
 [DebuggerDisplay("Position = {Position,nq}, Target = {ToString(),nq}")]
 public readonly record struct Branch(int Position, TargetInfo TargetInfo, TargetInfo[]? SwitchTargets) : IEnumerable<TargetInfo>
@@ -84,10 +87,177 @@ public static class BasicILScanner
 
     public static bool TryReadIL(MethodInfo baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
     {
-        MethodBody? methodBody = baseMethod.GetMethodBody();
-        byte[]? il = methodBody?.GetILAsByteArray();
+        string? file = baseMethod.DeclaringType?.Assembly.Location;
+        if (string.IsNullOrEmpty(file))
+        {
+            instructions = null;
+            branchTargets = null;
+            return false;
+        }
 
-        if (methodBody == null || il == null)
+        using FileStream stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using PEReader peReader = new PEReader(stream);
+
+        MetadataReader reader = peReader.GetMetadataReader();
+        MethodDefinitionHandle handle = (MethodDefinitionHandle)MetadataTokens.Handle(baseMethod.MetadataToken);
+        MethodDefinition mdef = reader.GetMethodDefinition(handle);
+
+        if (mdef.RelativeVirtualAddress != 0)
+        {
+            MethodBodyBlock body = peReader.GetMethodBody(mdef.RelativeVirtualAddress);
+            return TryReadIL(reader, mdef, body, out instructions, out branchTargets);
+        }
+
+        instructions = null;
+        branchTargets = null;
+        return false;
+    }
+
+    //    public static bool TryReadIL(MethodInfo baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
+    //    {
+    //        MethodBody? methodBody = baseMethod.GetMethodBody();
+    //        byte[]? il = methodBody?.GetILAsByteArray();
+
+    //        if (methodBody == null || il == null)
+    //        {
+    //            instructions = null;
+    //            branchTargets = null;
+    //            return false;
+    //        }
+
+    //        instructions = [];
+    //        branchTargets = [];
+    //        int size;
+
+    //        for (int pos = 0; pos < il.Length; pos += size)
+    //        {
+    //            int p = pos;
+
+    //            ushort code = il[pos++];
+    //            if (code == 0xFE)
+    //                code = (ushort)(0xFE00 + il[pos++]);
+
+    //            OpCode op = ops[(short)code];
+    //            size = OperandSize(op);
+
+    //            if (size == -1)
+    //            {
+    //                size = 4 + (BitConverter.ToInt32(il, pos) * 4); // variable size switch op
+    //            }
+
+    //            byte[] operand = il[pos..(pos + size)];
+    //            int depth = 0;
+    //            string? text = null;
+    //            bool stackReset = false;
+    //            bool exeption = false;
+    //            if (instructions.Count > 0)
+    //            {
+    //                OpCode opCode = instructions[^1].OpCode;
+    //                if (IsUnconditionalBranch(opCode))
+    //                {
+    //                    stackReset = true;
+
+    //#warning check clausess directly; less error prone
+    //                    if (opCode == OpCodes.Leave || opCode == OpCodes.Leave_S || opCode == OpCodes.Endfinally || opCode == OpCodes.Endfilter) // Exception handling
+    //                    {
+    //                        foreach (ExceptionHandlingClause clause in methodBody.ExceptionHandlingClauses)
+    //                        {
+    //                            if (clause.HandlerOffset == p)
+    //                            {
+    //                                exeption = true;
+
+    //                                if (clause.Flags == ExceptionHandlingClauseOptions.Clause || clause.Flags == ExceptionHandlingClauseOptions.Filter)
+    //                                {
+    //                                    // Compiler clears the stack, then pushes the exeption onto the stack externally
+    //                                    depth = 1;
+    //                                    text += $" [{clause.CatchType?.ToString()}]" ?? " [Exception]";
+    //                                }
+    //                                else
+    //                                {
+    //                                    depth = 0;
+    //                                }
+    //                            }
+    //                        }
+    //                    }
+    //                    if (!exeption && branchTargets.TryGetValue(p, out TargetInfo? info))
+    //                    {
+    //                        depth = info.IncomingDepth;
+    //                    }
+    //                }
+    //                else
+    //                {
+    //                    depth = instructions[^1].Depth;
+    //                }
+    //            }
+    //            depth += NetStackDepth(op, baseMethod, GetCalledMethod(baseMethod, op, operand), out int push, out int pop);
+
+    //            Branch? branch = default;
+    //            if (IsBranch(op))
+    //            {
+    //                int targetPos = GetRawTargetOfBranch(op, il, pos, out int[]? switchTargets); // Returns the highest target for switches
+    //                TargetInfo info = null!;
+    //                TargetInfo[]? switchInfo = null;
+
+    //                if (switchTargets != null && switchTargets.Length == 0)
+    //                    throw new InvalidOperationException("Internal logic error");
+
+    //                if (switchTargets == null)
+    //                {
+    //                    AddTarget(branchTargets, targetPos, depth, out TargetInfo targetInfo);
+    //                    info = targetInfo;
+    //                }
+    //                else
+    //                {
+    //                    switchInfo = new TargetInfo[switchTargets.Length];
+    //                    for (int i = 0; i < switchTargets.Length; i++)
+    //                    {
+    //                        int tar = switchTargets[i];
+    //                        AddTarget(branchTargets, tar, depth, out TargetInfo targetInfo);
+    //                        switchInfo[i] = targetInfo;
+
+    //                        if (tar == targetPos)
+    //                            info = targetInfo;
+    //                    }
+    //                }
+
+    //                branch = new(pos, info, switchInfo);
+
+    //                static void AddTarget(Dictionary<int, TargetInfo> branchTargets, int targetPos, int depth, out TargetInfo info)
+    //                {
+    //                    if (!branchTargets.TryGetValue(targetPos, out TargetInfo? targetInfo)) // Target depth takes the max of all incoming branch depths (but i think they should all be the same?)
+    //                    {
+    //                        targetInfo = new(targetPos, 1, depth);
+    //                        branchTargets[targetPos] = targetInfo;
+    //                    }
+    //                    else
+    //                    {
+    //                        targetInfo.Count++;
+    //                        if (depth > targetInfo.IncomingDepth)
+    //                        {
+    //                            targetInfo.IncomingDepth = depth;
+    //                        }
+    //                    }
+    //                    info = targetInfo;
+    //                }
+    //            }
+
+    //            instructions.Add(new(op, operand, push, pop, text, p, depth, branch, stackReset, exeption));
+    //        }
+    //        return true;
+    //    }
+
+    //public static bool TryReadIL(MetadataReader reader, MethodDefinition mdef, MethodBodyBlock body, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
+    //{
+    //    //byte[] il = blob.ReadBytes(blob.RemainingBytes);
+    //    byte[]? il = body.GetILBytes();
+    //    return TryReadIL(reader, mdef, body, il, out instructions, out branchTargets);
+    //}
+
+    public static bool TryReadIL(MetadataReader reader, MethodDefinition mdef, MethodBodyBlock body, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
+    {
+        byte[]? il = body.GetILBytes();
+
+        if (il == null)
         {
             instructions = null;
             branchTargets = null;
@@ -121,24 +291,25 @@ public static class BasicILScanner
             bool exeption = false;
             if (instructions.Count > 0)
             {
-                OpCode opCode = instructions[^1].OpCode;
-                if (IsUnconditionalBranch(opCode))
+                OpCode prevOpCode = instructions[^1].OpCode;
+                if (IsUnconditionalBranch(prevOpCode))
                 {
                     stackReset = true;
 
-                    if (opCode == OpCodes.Leave || opCode == OpCodes.Leave_S) // Exception handling
+#warning check clausess directly; less error prone
+                    if (prevOpCode == OpCodes.Leave || prevOpCode == OpCodes.Leave_S) // Exception handling
                     {
-                        foreach (ExceptionHandlingClause clause in methodBody.ExceptionHandlingClauses)
+                        foreach (ExceptionRegion exRegion in body.ExceptionRegions)
                         {
-                            if (clause.HandlerOffset == p)
+                            if (exRegion.HandlerOffset == p)
                             {
                                 exeption = true;
 
-                                if (clause.Flags == ExceptionHandlingClauseOptions.Clause || clause.Flags == ExceptionHandlingClauseOptions.Filter)
+                                if (exRegion.Kind == ExceptionRegionKind.Catch || exRegion.Kind == ExceptionRegionKind.Filter)
                                 {
                                     // Compiler clears the stack, then pushes the exeption onto the stack externally
                                     depth = 1;
-                                    text += $" [{clause.CatchType?.ToString()}]" ?? " [Exception]";
+                                    text += $" [{exRegion.CatchType}]" ?? " [Exception]";
                                 }
                                 else
                                 {
@@ -157,7 +328,8 @@ public static class BasicILScanner
                     depth = instructions[^1].Depth;
                 }
             }
-            depth += NetStackDepth(op, baseMethod, GetCalledMethod(baseMethod, op, operand));
+            //depth += NetStackDepth(reader, mdef, GetCalledMethod(op, operand), op, out int push, out int pop);
+            depth += NetStackDepth(reader, mdef, op, operand, out int push, out int pop);
 
             Branch? branch = default;
             if (IsBranch(op))
@@ -209,7 +381,7 @@ public static class BasicILScanner
                 }
             }
 
-            instructions.Add(new(op, operand, text, p, depth, branch, stackReset, exeption));
+            instructions.Add(new(op, operand, push, pop, text, p, depth, branch, stackReset, exeption));
         }
         return true;
     }
@@ -276,6 +448,7 @@ public static class BasicILScanner
 
     public static bool IsCall(OpCode op) =>
         op == OpCodes.Call
+        || op == OpCodes.Calli
         || op == OpCodes.Callvirt
         || op == OpCodes.Newobj;
 
@@ -325,7 +498,7 @@ public static class BasicILScanner
             int token = BitConverter.ToInt32(il, 0);
             return baseMethod.Module.ResolveField(token, baseMethod.DeclaringType?.GetGenericArguments(), baseMethod.GetGenericArguments());
         }
-        else if (IsCall(op))
+        else if (IsCall(op) && op != OpCodes.Calli)
         {
             int token = BitConverter.ToInt32(il, 0); // Operand is a 4-byte metadata token
             MethodBase? calledMethod = baseMethod.Module.ResolveMethod(token, baseMethod.DeclaringType?.GetGenericArguments(), baseMethod.GetGenericArguments())!;
@@ -335,12 +508,37 @@ public static class BasicILScanner
         return null;
     }
 
+    public static object? GetOperand(MetadataReader reader, OpCode op, byte[] il)
+    {
+        if (IsLoadNumericConstant(op))
+        {
+            return GetIntFromIL(op, il);
+        }
+        else if (op == OpCodes.Ldstr)
+        {
+            return GetStringFromIL(reader, il);
+        }
+        //else if (IsFieldAccess(op))
+        //{
+        //    int token = BitConverter.ToInt32(il, 0);
+        //    return baseMethod.Module.ResolveField(token, baseMethod.DeclaringType?.GetGenericArguments(), baseMethod.GetGenericArguments());
+        //}
+        //else if (IsCall(op))
+        //{
+        //    int token = BitConverter.ToInt32(il, 0); // Operand is a 4-byte metadata token
+        //    MethodBase? calledMethod = baseMethod.Module.ResolveMethod(token, baseMethod.DeclaringType?.GetGenericArguments(), baseMethod.GetGenericArguments())!;
+        //    return calledMethod;
+        //}
+
+        return null;
+    }
+
     public static MethodBase? GetCalledMethod(MethodInfo baseMethod, Instruction instruction)
     {
         return GetCalledMethod(baseMethod, instruction.OpCode, instruction.OperandIL);
     }
 
-    public static MethodBase? GetCalledMethod(MethodInfo baseMethod, OpCode op, Byte[] il)
+    public static MethodBase? GetCalledMethod(MethodInfo baseMethod, OpCode op, byte[] il)
     {
         if (IsCall(op))
         {
@@ -351,6 +549,119 @@ public static class BasicILScanner
 
         return null;
     }
+
+    //[Obsolete()]
+    //public static EntityHandle? GetCalledMethod(MetadataReader reader, OpCode op, byte[] il)
+    //{
+    //    if (IsCall(op))
+    //    {
+    //        if (op == OpCodes.Calli)
+    //        {
+    //            int token = BitConverter.ToInt32(il, 0);
+    //            StandaloneSignatureHandle sigHandle = MetadataTokens.StandaloneSignatureHandle(token);
+    //            StandaloneSignature sig = reader.GetStandaloneSignature(sigHandle);
+    //            BlobHandle blobHandle = sig.Signature;
+    //            BlobReader blob = reader.GetBlobReader(blobHandle);
+    //            //ReadOnlySpan<byte> sigBytes = reader.GetBlobBytes(blobHandle);
+
+    //            MethodSignature<int> s = new SignatureDecoder<int, object?>(new StackDeltaTypeProvider(), reader, null).DecodeMethodSignature(ref blob);
+    //            throw new Exception();
+    //            // Decode:
+    //            //byte callingConvention = sigBytes[0];       // e.g. 0x02 = Cdecl, 0x01 = Stdcall
+    //            //int offset = 1;
+    //            //int paramCount = (int)BinaryReaderUtils.ReadCompressedInteger(sigBytes, ref offset);
+    //            //int retType = sigBytes[offset++];         // ELEMENT_TYPE_*
+    //            // then paramCount more ELEMENT_TYPE_* values follow
+    //        }
+    //        else
+    //        {
+    //            int token = BitConverter.ToInt32(il, 0); // Operand is a 4-byte metadata token
+    //            EntityHandle handle = MetadataTokens.EntityHandle(token);
+    //            return handle;
+    //        }
+    //    }
+
+    //    return null;
+    //}
+
+    public static MethodSignature<int> GetMethodSignature(MethodDefinition mdef)
+    {
+        MethodSignature<int> sig = mdef.DecodeSignature(new StackDeltaTypeProvider(), default);
+        return sig;
+    }
+
+    public static MethodSignature<int> GetMethodSignature(MetadataReader reader, MethodDefinition? baseDef, OpCode op, byte[] il)
+    {
+        if (op == OpCodes.Ret)
+        {
+            if (baseDef == null)
+                throw new ArgumentNullException(nameof(baseDef));
+
+            return GetMethodSignature(baseDef.Value);
+        }
+        else if (IsCall(op))
+        {
+            if (op == OpCodes.Calli)
+            {
+                int token = BitConverter.ToInt32(il, 0);
+                StandaloneSignature sig = reader.GetStandaloneSignature(MetadataTokens.StandaloneSignatureHandle(token));
+                BlobReader blob = reader.GetBlobReader(sig.Signature);
+
+                MethodSignature<int> mSig = new SignatureDecoder<int, object?>(new StackDeltaTypeProvider(), reader, null).DecodeMethodSignature(ref blob);
+                return mSig;
+            }
+            else
+            {
+                int token = BitConverter.ToInt32(il, 0); // Operand is a 4-byte metadata token
+                EntityHandle handle = MetadataTokens.EntityHandle(token);
+                return SignatureFromHandle(reader, handle);
+            }
+        }
+
+        throw new ArgumentException("Cannot get a method signature from a non-calling opcode type.", nameof(op));
+
+
+        static MethodSignature<int> SignatureFromHandle(MetadataReader reader, EntityHandle calledHandle)
+        {
+            if (calledHandle.Kind == HandleKind.MethodDefinition)
+            {
+                MethodDefinitionHandle handle = (MethodDefinitionHandle)calledHandle;
+                MethodDefinition mdef = reader.GetMethodDefinition(handle); // will need to handle MemberReference later (external assemblies)
+                //MethodSignature<string> stringSig = mdef.DecodeSignature(new StringTypeProvider(), default);
+                MethodSignature<int> sig = mdef.DecodeSignature(new StackDeltaTypeProvider(), default);
+                return sig;
+            }
+            else if (calledHandle.Kind == HandleKind.MemberReference)
+            {
+                MemberReferenceHandle handle = (MemberReferenceHandle)calledHandle;
+                MemberReference mr = reader.GetMemberReference(handle);
+                MethodSignature<int> sig = mr.DecodeMethodSignature(new StackDeltaTypeProvider(), default);
+                return sig;
+            }
+            else if (calledHandle.Kind == HandleKind.MethodSpecification)
+            {
+                MethodSpecification mspec = reader.GetMethodSpecification((MethodSpecificationHandle)calledHandle);
+                EntityHandle underlying = mspec.Method; // MethodDef or MemberRef
+                return SignatureFromHandle(reader, underlying);
+            }
+            else
+            {
+                throw new ArgumentException($"Invalid {nameof(HandleKind)} '{calledHandle.Kind}'", nameof(calledHandle));
+            }
+        }
+    }
+
+    //public static MethodDefinition? GetCalledMethod(MetadataReader reader, OpCode op, byte[] il)
+    //{
+    //    if (IsCall(op))
+    //    {
+    //        int token = BitConverter.ToInt32(il, 0); // Operand is a 4-byte metadata token
+    //        MethodDefinitionHandle handle = MetadataTokens.MethodDefinitionHandle(token);
+    //        return reader.GetMethodDefinition(handle);
+    //    }
+
+    //    return null;
+    //}
 
     public static int GetIntFromIL(OpCode opCode, byte[] operandIL)
     {
@@ -380,6 +691,13 @@ public static class BasicILScanner
         int token = BitConverter.ToInt32(operandIL, 0);
         string s = module.ResolveString(token);
         return s;
+    }
+
+    public static string GetStringFromIL(MetadataReader reader, byte[] operandIL)
+    {
+        int token = BitConverter.ToInt32(operandIL, 0);
+        UserStringHandle handle = MetadataTokens.UserStringHandle(token);
+        return reader.GetUserString(handle);
     }
 
     public static int GetRawTargetOfBranch(OpCode op, byte[] il, int pos, out int[]? switchTargets)
@@ -416,21 +734,112 @@ public static class BasicILScanner
         return -1;
     }
 
-    public static int NetStackDepth(MethodInfo baseMethod, Instruction instruction)
+    public static int NetStackDepth(MethodInfo baseMethod, Instruction instruction, out int push, out int pop)
     {
-        return NetStackDepth(instruction.OpCode, baseMethod, GetCalledMethod(baseMethod, instruction));
+        return NetStackDepth(instruction.OpCode, baseMethod, GetCalledMethod(baseMethod, instruction), out push, out pop);
     }
 
-    public static int NetStackDepth(OpCode opCode, MethodInfo baseMethod, MethodBase? called)
+    public static int NetStackDepth(OpCode opCode, MethodInfo baseMethod, MethodBase? called, out int push, out int pop)
     {
         if (opCode == OpCodes.Ret || called != null && IsCall(opCode)) // box and unbox too?
         {
-            int depth = MethodPushDepth(opCode, called) - MethodPopDepth(opCode, baseMethod, called);
+            push = MethodPushDepth(opCode, called);
+            pop = MethodPopDepth(opCode, baseMethod, called);
+            int depth = push - pop;
             return depth;
         }
         else
         {
+            push = PushDepth(opCode, baseMethod, called);
+            pop = PopDepth(opCode, baseMethod, called);
             return opCode.EvaluationStackDelta;
+        }
+    }
+
+    //[Obsolete]
+    //public static int NetStackDepth(MetadataReader reader, MethodDefinition baseDef, EntityHandle? calledHandle, OpCode opCode, out int push, out int pop)
+    //{
+    //    if (opCode == OpCodes.Ret)
+    //    {
+    //        MethodSignature<int> sig = baseDef.DecodeSignature(new StackDeltaTypeProvider(), default);
+    //        push = 0;
+    //        pop = MethodPushDepth(reader, sig, opCode);
+    //        return -pop;
+    //    }
+    //    else if (IsCall(opCode)) // box and unbox too?
+    //    {
+    //        if (!calledHandle.HasValue) throw new ArgumentNullException(nameof(calledHandle));
+
+    //        if (calledHandle.Value.Kind == HandleKind.MethodDefinition)
+    //        {
+    //            MethodDefinitionHandle handle = (MethodDefinitionHandle)calledHandle.Value;
+    //            MethodDefinition mdef = reader.GetMethodDefinition(handle); // will need to handle MemberReference later (external assemblies)
+    //            //MethodSignature<string> stringSig = mdef.DecodeSignature(new StringTypeProvider(), default);
+    //            MethodSignature<int> sig = mdef.DecodeSignature(new StackDeltaTypeProvider(), default);
+    //            push = MethodPushDepth(reader, sig, opCode);
+    //            pop = MethodPopDepth(reader, sig, opCode);
+    //            int depth = push - pop;
+    //            return depth;
+    //        }
+    //        else if (calledHandle.Value.Kind == HandleKind.MemberReference)
+    //        {
+    //            MemberReferenceHandle handle = (MemberReferenceHandle)calledHandle.Value;
+    //            MemberReference mr = reader.GetMemberReference(handle);
+    //            MethodSignature<int> sig = mr.DecodeMethodSignature(new StackDeltaTypeProvider(), default);
+
+    //            push = MethodPushDepth(reader, sig, opCode);
+    //            pop = MethodPopDepth(reader, sig, opCode);
+    //            int depth = push - pop;
+    //            return depth;
+    //        }
+    //        else if (calledHandle.Value.Kind == HandleKind.MethodSpecification)
+    //        {
+    //            MethodSpecification mspec = reader.GetMethodSpecification((MethodSpecificationHandle)calledHandle.Value);
+    //            EntityHandle underlying = mspec.Method; // MethodDef or MemberRef
+    //            return NetStackDepth(reader, baseDef, underlying, opCode, out push, out pop);
+    //        }
+    //        else
+    //        {
+    //            push = 0;
+    //            pop = 0;
+    //            return 0;
+    //        }
+    //    }
+    //    else
+    //    {
+    //        if (opCode.StackBehaviourPop == StackBehaviour.Varpop || opCode.StackBehaviourPush == StackBehaviour.Varpush)
+    //        {
+    //            ;
+    //        }
+
+    //        push = PushDepth(reader, baseDef, opCode);
+    //        pop = PopDepth(reader, baseDef, opCode);
+    //        return opCode.EvaluationStackDelta;
+    //    }
+    //}
+
+    public static int NetStackDepth(MetadataReader reader, MethodDefinition baseDef, OpCode opCode, byte[] il, out int push, out int pop)
+    {
+        //if (opCode == OpCodes.Ret)
+        //{
+        //    MethodSignature<int> sig = GetMethodSignature(baseDef); // baseDef.DecodeSignature(new StackDeltaTypeProvider(), default);
+        //    push = 0;
+        //    pop = MethodPushDepth(reader, sig, opCode);
+        //    return -pop;
+        //}
+        //else if (IsCall(opCode)) // box and unbox too?
+        //{
+        //    MethodSignature<int> calledSig = GetMethodSignature(reader, null, opCode, il); // ?? throw new InvalidOperationException($"Could not resolve method signature from a {opCode}'s operand");
+        //    push = MethodPushDepth(reader, calledSig, opCode);
+        //    pop = MethodPopDepth(reader, calledSig, opCode);
+        //    int depth = push - pop;
+        //    return depth;
+        //}
+        //else
+        {
+            push = PushDepth(reader, baseDef, opCode, il);
+            pop = PopDepth(reader, baseDef, opCode, il);
+            return push - pop;
         }
     }
 
@@ -534,5 +943,115 @@ public static class BasicILScanner
 
         int returns = (called is MethodInfo m && m.ReturnType != typeof(void) || opCode == OpCodes.Newobj) ? 1 : 0;
         return returns;
+    }
+
+    public static int PopDepth(MetadataReader reader, MethodDefinition baseDef, OpCode opCode, byte[] il)
+    {
+        int pop = opCode.StackBehaviourPop switch
+        {
+            StackBehaviour.Pop0 => 0,
+            StackBehaviour.Pop1 => 1,
+            StackBehaviour.Pop1_pop1 => 2,
+            StackBehaviour.Popi => 1,
+            StackBehaviour.Popi_pop1 => 2,
+            StackBehaviour.Popi_popi => 2,
+            StackBehaviour.Popi_popi_popi => 3,
+            StackBehaviour.Popi_popi8 => 2,
+            StackBehaviour.Popi_popr4 => 2,
+            StackBehaviour.Popi_popr8 => 2,
+            StackBehaviour.Popref => 1,
+            StackBehaviour.Popref_pop1 => 2,
+            StackBehaviour.Popref_popi => 2,
+            StackBehaviour.Popref_popi_pop1 => 3,
+            StackBehaviour.Popref_popi_popi => 3,
+            StackBehaviour.Popref_popi_popi8 => 3,
+            StackBehaviour.Popref_popi_popr4 => 3,
+            StackBehaviour.Popref_popi_popr8 => 3,
+            StackBehaviour.Popref_popi_popref => 3,
+            StackBehaviour.Push0 => 0,
+            StackBehaviour.Push1 => 0,
+            StackBehaviour.Push1_push1 => 0,
+            StackBehaviour.Pushi => 0,
+            StackBehaviour.Pushi8 => 0,
+            StackBehaviour.Pushr4 => 0,
+            StackBehaviour.Pushr8 => 0,
+            StackBehaviour.Pushref => 0,
+            StackBehaviour.Varpop => MethodPopDepth(GetMethodSignature(reader, baseDef, opCode, il), opCode),
+            StackBehaviour.Varpush => 0,
+            _ => throw new InvalidEnumArgumentException(),
+        };
+        return pop;
+    }
+
+    public static int PushDepth(MetadataReader reader, MethodDefinition baseDef, OpCode opCode, byte[] il)
+    {
+        int push = opCode.StackBehaviourPush switch
+        {
+            StackBehaviour.Pop0 => 0,
+            StackBehaviour.Pop1 => 0,
+            StackBehaviour.Pop1_pop1 => 0,
+            StackBehaviour.Popi => 0,
+            StackBehaviour.Popi_pop1 => 0,
+            StackBehaviour.Popi_popi => 0,
+            StackBehaviour.Popi_popi_popi => 0,
+            StackBehaviour.Popi_popi8 => 0,
+            StackBehaviour.Popi_popr4 => 0,
+            StackBehaviour.Popi_popr8 => 0,
+            StackBehaviour.Popref => 0,
+            StackBehaviour.Popref_pop1 => 0,
+            StackBehaviour.Popref_popi => 0,
+            StackBehaviour.Popref_popi_pop1 => 0,
+            StackBehaviour.Popref_popi_popi => 0,
+            StackBehaviour.Popref_popi_popi8 => 0,
+            StackBehaviour.Popref_popi_popr4 => 0,
+            StackBehaviour.Popref_popi_popr8 => 0,
+            StackBehaviour.Popref_popi_popref => 0,
+            StackBehaviour.Push0 => 0,
+            StackBehaviour.Push1 => 1,
+            StackBehaviour.Push1_push1 => 2,
+            StackBehaviour.Pushi => 1,
+            StackBehaviour.Pushi8 => 1,
+            StackBehaviour.Pushr4 => 1,
+            StackBehaviour.Pushr8 => 1,
+            StackBehaviour.Pushref => 1,
+            StackBehaviour.Varpop => 0,
+            StackBehaviour.Varpush => MethodPushDepth(GetMethodSignature(reader, baseDef, opCode, il), opCode),
+            _ => throw new InvalidEnumArgumentException(),
+        };
+        return push;
+    }
+
+    public static int MethodPopDepth(MethodSignature<int> sig, OpCode opCode)
+    {
+        if (opCode == OpCodes.Ret)
+            return -sig.ReturnType; // special case
+
+        int pop = sig.ParameterTypes.Length;
+
+        if (opCode == OpCodes.Calli)
+            pop++; // for the fn pointer
+
+        if (sig.Header.Attributes.HasFlag(SignatureAttributes.Instance) && opCode != OpCodes.Newobj)
+            pop++; // 'this' (but not for static or ctor)
+
+        return pop;
+    }
+
+    public static int MethodPushDepth(MethodSignature<int> sig, OpCode opCode)
+    {
+        if (opCode == OpCodes.Newobj)
+            return 1;
+
+        return opCode == OpCodes.Newobj ? 1 : sig.ReturnType;
+    }
+
+    public static string MethodName(MetadataReader reader, MethodDefinition mdef)
+    {
+        TypeDefinitionHandle typeHandle = mdef.GetDeclaringType();
+        StringHandle tStringHandle = reader.GetTypeDefinition(typeHandle).Name;
+        StringHandle mStringHandle = mdef.Name;
+        string typeName = reader.GetString(tStringHandle);
+        string methodName = reader.GetString(mStringHandle);
+        return $"{typeName}.{methodName}";
     }
 }
