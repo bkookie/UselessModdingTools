@@ -1,4 +1,5 @@
 ﻿using System.Reflection;
+using System.Reflection.Emit;
 using System.Text;
 
 namespace UselessModdingTools.IL;
@@ -116,6 +117,8 @@ public static class ILStackVisualizer
 
                     if (instruction.Branch.Value.SwitchTargets != null)
                     {
+                        // TODO: order the branches so that the channels are in the same order as the switch operands
+
                         // Find the left-most channel this inline switch will link with
                         for (int n = 0; n < pramsToConsume.Count - 1; n++)
                         {
@@ -183,7 +186,7 @@ public static class ILStackVisualizer
                         if (k >= 0)
                         {
                             if (pushed == 1)
-                                reach = lastIndex - k; // How many indent levels the pushed value needs to stretch across (usually 0)
+                                reach = lastIndex - k; // How many indent levels the pushed value needs to stretch across (usually 0, but required when a branch channel gets inserted inside a param channel)
 
                             if (j > 0)
                             {
@@ -563,7 +566,9 @@ public static class ILStackVisualizer
 
     private static string InstructionToString(MethodInfo baseMethod, Instruction instruction)
     {
-        return $"{instruction.OpCode}{instruction.Text}{FormatOperand(BasicILScanner.GetOperand(baseMethod, instruction))}";
+        // If next target is unconditional branch, use "┤" instead?
+        string or = (instruction.OpCode == OpCodes.Or) ? "┘" : ""; // Only has two letters so otherwise looks broken when connecting pipes (pipes connect to the third letter)
+        return $"{instruction.OpCode}{or}{instruction.Text}{FormatOperand(BasicILScanner.GetOperand(baseMethod, instruction))}";
     }
 
     private static string? FormatOperand(object? operand)
