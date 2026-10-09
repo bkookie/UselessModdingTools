@@ -117,7 +117,7 @@ public static class ILStackVisualizer
                     if (instruction.Branch.Value.SwitchTargets != null)
                     {
                         // Find the left-most channel this inline switch will link with
-                        for (int n = pramsToConsume.Count - 1; n >= 0; n--)
+                        for (int n = 0; n < pramsToConsume.Count - 1; n++)
                         {
                             Params pram = pramsToConsume[n];
                             foreach (TargetInfo inf in instruction.Branch.Value)
@@ -125,6 +125,7 @@ public static class ILStackVisualizer
                                 if (pram.RemainingParams == branchMaps[inf.Target])
                                 {
                                     targetPos = inf.Target;
+                                    n = pramsToConsume.Count; // break for;
                                     break;
                                 }
                             }
@@ -135,22 +136,22 @@ public static class ILStackVisualizer
                     {
                         isBranch = true;
                         branchChannel = GetChannel(branchMaps, targetPos, ref channelId);
-                        int numBranchPaths;
+                        int numBranchPathsToThisTarget;
 
                         if (instruction.Branch.Value.SwitchTargets != null)
                         {
-                            numBranchPaths = instruction.Branch.Value.SwitchTargets.Count(b => b.Target == targetPos); // InlineSwitch may have multiple branches for the same target
+                            numBranchPathsToThisTarget = instruction.Branch.Value.SwitchTargets.Count(b => b.Target == targetPos); // InlineSwitch may have multiple branches for the same target
                         }
                         else
                         {
-                            numBranchPaths = 1;
+                            numBranchPathsToThisTarget = 1;
                         }
 
-                        info.Count -= numBranchPaths;
+                        info.Count -= numBranchPathsToThisTarget;
 
                         if (targetPos < pos)
                         {
-                            info.BackBranches += numBranchPaths;
+                            info.BackBranches += numBranchPathsToThisTarget;
 
                             int branchChannelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams < 0) + 1;
                             pramsToConsume.Insert(branchChannelIndex, new(branchChannelIndex + 1, branchChannel));
@@ -334,7 +335,16 @@ public static class ILStackVisualizer
                                     throw new InvalidOperationException($"{nameof(branchInfo)} should not be null");
 
                                 linkedWithChannel = true;
-                                if (branchInfo.Value.TargetInfo.Target < branchInfo.Value.Position)
+                                if (map != null && map.TryGetValue(prams.RemainingParams, out TargetInfo? targetInfo))
+                                {
+                                    if (targetInfo.Target < branchInfo.Value.Position)
+                                        sb2.Append("└───");
+                                    else if (targetInfo.Count == 0)
+                                        sb2.Append("┌───");
+                                    else
+                                        sb2.Append("├───");
+                                }
+                                else if (branchInfo.Value.TargetInfo.Target < branchInfo.Value.Position)
                                     sb2.Append("└───");
                                 else if (branchInfo.Value.TargetInfo.Count == 0)
                                     sb2.Append("┌───");
@@ -373,6 +383,7 @@ public static class ILStackVisualizer
                                 if (map != null && map.TryGetValue(prams.RemainingParams, out TargetInfo? targetInfo))
                                 {
                                     // This should only trigger on inlineswitch
+                                    // Only the left-most channel will have been processed; do the remainder here
                                     if (branchInfo != null && branchInfo.Value.SwitchTargets != null)
                                     {
                                         targetInfo.Count -= branchInfo.Value.SwitchTargets.Count(b => b.Target == targetInfo.Target); // InlineSwitch may have multiple branches for the same target
