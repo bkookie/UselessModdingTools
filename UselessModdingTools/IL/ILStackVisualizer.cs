@@ -470,7 +470,7 @@ public static class ILStackVisualizer
                 }
                 dupPipingIndexes.Clear();
 
-                if (popped > 0 && !instruction.IsExceptionHandlerLead) // The instruction leading an exeption handler consumes a value pushed by the CLR externally to the method (dont try to trace it)
+                if (popped > 0 && !instruction.StackReset && !instruction.IsExceptionHandlerLead) // The instruction leading an exeption handler consumes a value pushed by the CLR externally to the method (dont try to trace it)
                 {
                     pramsToConsume.Add(new(pramsToConsume.Count + 1 + extraIndent, popped));
                     if (pramsToConsume.Count > maxIndent)

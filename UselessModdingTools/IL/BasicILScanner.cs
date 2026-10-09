@@ -7,7 +7,7 @@ using System.Reflection.Emit;
 
 namespace UselessModdingTools.IL;
 
-public readonly record struct Instruction(OpCode OpCode, byte[] OperandIL, string? Text, int Position, int Depth, Branch? Branch, bool IsExceptionHandlerLead);
+public readonly record struct Instruction(OpCode OpCode, byte[] OperandIL, string? Text, int Position, int Depth, Branch? Branch, bool StackReset, bool IsExceptionHandlerLead);
 
 [DebuggerDisplay("Position = {Position,nq}, Target = {ToString(),nq}")]
 public readonly record struct Branch(int Position, TargetInfo TargetInfo, TargetInfo[]? SwitchTargets) : IEnumerable<TargetInfo>
@@ -117,12 +117,15 @@ public static class BasicILScanner
             byte[] operand = il[pos..(pos + size)];
             int depth = 0;
             string? text = null;
+            bool stackReset = false;
             bool exeption = false;
             if (instructions.Count > 0)
             {
                 OpCode opCode = instructions[^1].OpCode;
                 if (IsUnconditionalBranch(opCode))
                 {
+                    stackReset = true;
+
                     if (opCode == OpCodes.Leave || opCode == OpCodes.Leave_S) // Exception handling
                     {
                         foreach (ExceptionHandlingClause clause in methodBody.ExceptionHandlingClauses)
@@ -206,7 +209,7 @@ public static class BasicILScanner
                 }
             }
 
-            instructions.Add(new(op, operand, text, p, depth, branch, exeption));
+            instructions.Add(new(op, operand, text, p, depth, branch, stackReset, exeption));
         }
         return true;
     }
