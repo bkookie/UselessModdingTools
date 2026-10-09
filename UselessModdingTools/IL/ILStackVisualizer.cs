@@ -5,7 +5,7 @@ namespace UselessModdingTools.IL;
 
 //internal readonly record struct StackEntry(int DepthAfter, Instruction Instruction);
 
-internal readonly record struct Item(int Depth, int Pos, int Indent, string Text, bool IsBranchTarget);
+internal readonly record struct Item(int Depth, int Pos, int Indent, string Text, bool IsBranchTarget, bool IsUnconditionalBranchWithStack);
 internal readonly record struct Params(int Indent, int RemainingParams); // RemainingParams is dual purpose; when negative, instead is the mapkey of a branchTarget channel
 #warning Indent property seems redundant. It is identical to its index in the pramsToConsume list
 
@@ -173,7 +173,7 @@ public static class ILStackVisualizer
 
                 int reach = 0;
                 if (pushed > 0 && pramsToConsume.Count > 0
-                    && (i == pramsToConsume.Count - 1 || !BasicILScanner.IsUnconditionalNonPoppingBranch(instructions[i + 1].OpCode))) // Cannot push because they do not pop
+                    && (i == pramsToConsume.Count - 1 || !BasicILScanner.IsUnconditionalNonPoppingBranch(instructions[i + 1].OpCode))) // Cannot push onto unconditional branch because they do not pop (aside from inline switches)
                 {
                     int lastIndex = pramsToConsume.Count - 1;
                     for (int j = 0; j < pushed; j++)
@@ -258,11 +258,11 @@ public static class ILStackVisualizer
 
                 StringBuilder sb2 = new();
                 sb2.Append("    ");
-                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, instruction.Branch, isBranch, branchChannel, indent, reach, isBranchTarget: false, null);
+                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, instruction.Branch, isBranch, branchChannel, indent, isUnconditionalBranchWithStack: false, reach, isBranchTarget: false, null);
                 sb2.Append(InstructionToString(baseMethod, instruction));
                 int extraIndent = indent - pramsToConsume.Count;
 
-                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, Branch? branchInfo, bool isBranch, int branchChannel, int branchIndent, int reach, bool isBranchTarget, TargetInfo? branchTargetInfo)
+                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, Branch? branchInfo, bool isBranch, int branchChannel, int branchIndent, bool isUnconditionalBranchWithStack, int reach, bool isBranchTarget, TargetInfo? branchTargetInfo)
                 {
                     Dictionary<int, TargetInfo>? map = null;
                     if (branchInfo.HasValue)
@@ -458,9 +458,20 @@ public static class ILStackVisualizer
                         {
                             // No more channels on the stack, so need to manually pipe across to the label
                             if (isBranchTarget && i == remainingBranchTargetIndent - 1)
-                                sb2.Append("─┐");
+                            {
+                                if (isUnconditionalBranchWithStack)
+                                    sb2.Append("─┐│");
+                                else
+                                    sb2.Append("─┐");
+                            }
                             else
+                            {
                                 sb2.Append("────");
+                            }
+                        }
+                        else if (isUnconditionalBranchWithStack && i == remainingBranchTargetIndent - 1)
+                        {
+                            sb2.Append('│');
                         }
                         else
                         {
@@ -476,14 +487,15 @@ public static class ILStackVisualizer
                     if (pramsToConsume.Count > maxIndent)
                         maxIndent++;
                 }
-                items.Add(new(instruction.Depth, instruction.Position, indent, sb2.ToString(), false));
+                items.Add(new(instruction.Depth, instruction.Position, indent, sb2.ToString(), false, false));
 
                 if (isBranch && branchChannelIndexToRemove >= 0)
                 {
                     pramsToConsume[branchChannelIndexToRemove] = pramsToConsume[branchChannelIndexToRemove] with { RemainingParams = 0 };
                 }
 
-                if (isBranchTarget)
+                bool isUnconditionalBranchWithStack = BasicILScanner.IsUnconditionalNonPoppingBranch(instruction.OpCode) && instruction.Depth > 0;
+                if (isBranchTarget || isUnconditionalBranchWithStack)
                 {
                     if (newBranchParams != null && branchTargetChannelIndex >= 0)
                     {
@@ -494,9 +506,9 @@ public static class ILStackVisualizer
                     }
                     StringBuilder sb3 = new();
                     sb3.Append("    ");
-                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, null, isBranch: false, branchChannel: 0, indent + 1, reach: 0, isBranchTarget, targetInfo);
+                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, null, isBranch: false, branchChannel: 0, indent + 1, isUnconditionalBranchWithStack, reach: 0, isBranchTarget, targetInfo);
                     //sb3.Append("─┐");
-                    items.Add(new(0, 0, branchTargetChannelIndex + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry
+                    items.Add(new(0, 0, branchTargetChannelIndex + 1, sb3.ToString(), isBranchTarget, isUnconditionalBranchWithStack)); // Add this after the main entry
 
                     if (branchTargetChannelIndexToRemove >= 0)
                     {
@@ -525,9 +537,9 @@ public static class ILStackVisualizer
 
             for (int i = items.Count - 1; i >= 0; i--)
             {
-                var (dep, pos, indent, str, isBranchTarget) = items[i];
+                var (dep, pos, indent, str, isBranchTarget, isUnconditionalBranchWithStack) = items[i];
 
-                if (isBranchTarget)
+                if (isBranchTarget || isUnconditionalBranchWithStack)
                 {
                     sb.AppendLine($"{new string(' ', 2 + maxDigits + 1 + 2 + 4)}{str}");
                 }
