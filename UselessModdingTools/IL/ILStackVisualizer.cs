@@ -17,9 +17,7 @@ internal readonly record struct Params(int Indent, int RemainingParams, bool IsB
 public static class ILStackVisualizer
 {
 #if DEBUG
-    //private const string debugMethod = "UselessModdingTools.IL.ILStackVisualizer.ReadMethod";
-    //private const string debugMethod = "UselessModdingTools.IL.BasicILScanner.TryReadIL";
-    private const string debugMethod = "Godot.Bridge.ScriptManagerBridge.GetScriptTypeInfo";
+    public const string debugMethod = "UselessModdingTools.IL.BasicILScanner.TryReadILInternal";
 
     private static string currentMethod = "";
 #endif
@@ -244,6 +242,7 @@ public static class ILStackVisualizer
                 int posLastPushedTo = -1; // Any branches encountered at or before this position can be traversed
                 bool foundBranch = false;
                 int conditionalBranchTargetPos = -1;
+                int hitUnconditionalBranchAtPos = int.MaxValue;
                 List<Params> sortedParams = [.. pramsToConsume];
                 sortedParams.Sort(Comparer<Params>.Create((x, y) =>
                 {
@@ -256,6 +255,9 @@ public static class ILStackVisualizer
                 for (int m = 0; m < sortedParams.Count; m++)
                 {
                     Params pram = sortedParams[m]; // 'm' now relates to the sorted list; do not use it to access the orignal list
+
+                    if (pram.SourceInstruction.Position > hitUnconditionalBranchAtPos)
+                        break;
 
                     if (pram.IsBranchInput && (remainingPush > 0 || pram.SourceInstruction.Position <= posLastPushedTo))
                     {
@@ -285,7 +287,7 @@ public static class ILStackVisualizer
                         if (BasicILScanner.IsUnconditionalBranch(pram.SourceInstruction.OpCode))
                         {
                             if (branchInputMaxSourcePosToLinkWith <= pram.SourceInstruction.Position)
-                                break;
+                                hitUnconditionalBranchAtPos = pram.SourceInstruction.Position; // Give a chance to hit the branchInputChannel (which will have the same Position, but sorted after)
                         }
                         else if (pram.SourceInstruction.Branch != null)
                         {
@@ -418,7 +420,6 @@ public static class ILStackVisualizer
                 bool feedingDup = false;
                 bool reached = false;
                 bool feedingBranchToChannel = false;
-                bool noLongerFeedingBranchToChannel = false;
                 int feedingFromChannelIndex = -1;
                 for (int j = 0; j < pramsToConsume.Count; j++)
                 {
@@ -461,6 +462,7 @@ public static class ILStackVisualizer
                                         }
                                         else
                                         {
+                                            feedingToBranchInput = true;
                                             if (pramsToConsume[j].RemainingParams > 0)
                                                 sb2.Append("├───");
                                             else
@@ -552,11 +554,6 @@ public static class ILStackVisualizer
                                         sb2.Append("┬───");
                                     else
                                         sb2.Append("──┬─");
-
-                                    if (numChannelsForBranchToFeed == 0)
-                                        noLongerFeedingBranchToChannel = true;
-                                    //feedingBranchToChannel = false;
-                                    //feedingFromChannelIndex = -1;
                                 }
                                 else
                                 {
@@ -573,9 +570,6 @@ public static class ILStackVisualizer
                                     sb2.Append("┬───");
                                 else
                                     sb2.Append("──┬─");
-
-                                if (j > feedingFromChannelIndex && numChannelsForBranchToFeed == 0)
-                                    noLongerFeedingBranchToChannel = true;
                             }
                         }
                         else if (prams.RemainingParams == 0)
@@ -770,7 +764,7 @@ public static class ILStackVisualizer
                             sb2.Append("────");
                         }
                     }
-                    else if (reach > 0)
+                    else if (feedingToBranchInput || reach > 0)
                     {
                         sb2.Append("────");
                     }
@@ -864,7 +858,7 @@ public static class ILStackVisualizer
                     }
 
                     if (numChannelsToCleanUp > 0)
-                        throw new InvalidOperationException($"Could not clean up all entries".AsErrorMsg());
+                        throw new InvalidOperationException($"Could not clean up all entries. MethodName = '{methodName}', Position = '{pos}'".AsErrorMsg());
                 }
             }
 

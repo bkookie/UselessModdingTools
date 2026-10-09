@@ -254,13 +254,13 @@ public static class BasicILScanner
             }
             else
             {
-                prevInstructionIsUnconditionalBranch = false;
+                prevInstructionIsUnconditionalBranch = IsUncoditionalControlTransferExcludingBranches(op);
             }
 
             object? operand = (branch != null)
                 ? branch
                 : (baseMethod != null)
-                    ? GetRuntimeOperand(baseMethod, op, il)
+                    ? GetRuntimeOperand(baseMethod, op, il) ?? GetMetadataOperand(reader, op, bodyIL)
                     : GetMetadataOperand(reader, op, bodyIL);
 
             instructions.Add(new(p, op, il, operand, push, pop, text, depth, branch, stackReset, exeption));
@@ -344,13 +344,22 @@ public static class BasicILScanner
         || op == OpCodes.Br_S
         || op == OpCodes.Leave
         || op == OpCodes.Leave_S
-        || op == OpCodes.Switch;
+        || op == OpCodes.Switch; // Including this here seems to be fine, but may break somewhere
 
     public static bool IsUnconditionalNonPoppingBranch(OpCode op) =>
         op == OpCodes.Br
         || op == OpCodes.Br_S
         || op == OpCodes.Leave
         || op == OpCodes.Leave_S;
+
+    public static bool IsUncoditionalControlTransferExcludingBranches(OpCode op) =>
+        op == OpCodes.Ret
+        || op == OpCodes.Throw
+        || op == OpCodes.Rethrow
+        || op == OpCodes.Jmp
+        || op == OpCodes.Endfinally
+        || op == OpCodes.Endfilter;
+
 
     public static int GetIntFromIL(OpCode opCode, byte[] il)
     {
@@ -630,9 +639,6 @@ public static class BasicILScanner
 
     private static int MethodPushDepth(MethodSignature<int> sig, OpCode op)
     {
-        if (op == OpCodes.Newobj)
-            return 1;
-
         return op == OpCodes.Newobj ? 1 : sig.ReturnType;
     }
 
@@ -654,6 +660,7 @@ public static class BasicILScanner
 
     public static string GetMethodFullName(MetadataReader reader, MethodDefinition mdef)
     {
+        // TODO: Actually get the full namespace name (not just typename + methodname)
         TypeDefinitionHandle typeHandle = mdef.GetDeclaringType();
         StringHandle tStringHandle = reader.GetTypeDefinition(typeHandle).Name;
         StringHandle mStringHandle = mdef.Name;
