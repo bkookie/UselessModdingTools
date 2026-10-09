@@ -12,7 +12,7 @@ using System.Text;
 namespace UselessModdingTools.IL;
 
 // StackReset: The instruction after an unconditional branch will not receive any input/stack values from before the branch. All values will come from an incoming branch (or externally, for exception handlers)
-public readonly record struct Instruction(OpCode OpCode, byte[] OperandIL, object? Operand, int Push, int Pop, string? Text, int Position, int Depth, Branch? Branch, bool StackReset, bool IsExceptionHandlerLead);
+public readonly record struct Instruction(int Position, OpCode OpCode, byte[] OperandIL, object? Operand, int Push, int Pop, string? Text, int Depth, Branch? Branch, bool StackReset, bool IsExceptionHandlerLead);
 
 [DebuggerDisplay("Position = {Position,nq}, Target = {ToString(),nq}")]
 public readonly record struct Branch(int Position, TargetInfo TargetInfo, TargetInfo[]? SwitchTargets) : IEnumerable<TargetInfo>
@@ -263,7 +263,7 @@ public static class BasicILScanner
                     ? GetRuntimeOperand(baseMethod, op, il)
                     : GetMetadataOperand(reader, op, bodyIL);
 
-            instructions.Add(new(op, il, operand, push, pop, text, p, depth, branch, stackReset, exeption));
+            instructions.Add(new(p, op, il, operand, push, pop, text, depth, branch, stackReset, exeption));
         }
         return true;
     }

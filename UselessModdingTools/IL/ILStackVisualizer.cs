@@ -115,7 +115,10 @@ public static class ILStackVisualizer
             ;
 #endif
 
-        int maxDigits = Math.Max(0, maxStackDepth.ToString().Length);
+        int maxStackDigits = Math.Max(0, maxStackDepth.ToString().Length);
+        int maxPos = instructions.Max(i => i.Position);
+        int maxPosDigitsHex = maxPos.ToString("X4").Length;
+        int maxPosDigitsDecimal = maxPos.ToString().Length;
 
         int maxIndent = 0;
         int channelId = 0; // Provides a unique id for channel mapping
@@ -310,7 +313,7 @@ public static class ILStackVisualizer
                             // The incoming branch is not a parameter to it's target, rather it brings sibling parameter(s) alongside it's target
                             carryOverPushAmount = targetInfo.IncomingDepth - popped;
                         }
-                        pramsToConsume[k] = tempPrams with { RemainingParams = tempPrams.RemainingParams - pushedAmount };
+                        pramsToConsume[k] = tempPrams.Reduce(pushedAmount);
                     }
                 }
             }
@@ -349,7 +352,7 @@ public static class ILStackVisualizer
                         targetInfo.BranchCount--;
                         if (targetInfo.BranchCount == 0)
                         {
-                            newBranchParams = pramsToConsume[branchTargetChannelIndex] with { RemainingParams = 0, IsBranchInput = false, FeedsFromBranchIndex = -1 };
+                            newBranchParams = pramsToConsume[branchTargetChannelIndex].Set(0);
                         }
                     }
                     else
@@ -385,11 +388,11 @@ public static class ILStackVisualizer
                 instruction.Branch, isBranch, branchChannel, indent,
                 branchInputChannelIndex, canLinkToBranchInput, branchInputMaxSourcePosToLinkWith, valuesPushedOntoBranch,
                 reach, isBranchTarget: false, null, numChannelsForBranchToFeed: 0);
-            pipes.Add(i, [$"[{instruction.Depth.ToString().PadLeft(maxDigits)}] <{pos,4}> {sb2}"]);
+            pipes.Add(i, [$"[{instruction.Depth.ToString().PadLeft(maxStackDigits)}] <{pos.ToString().PadLeft(maxPosDigitsDecimal)}> {sb2}"]);
             sb2.Append(InstructionToString(instruction));
 
             static void PrintPipes(StringBuilder sb2, int pos, int depth, int popped, int pushed, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor,
-                Branch? branchInfo, bool isBranch, int branchChannel, int branchIndent,
+                Branch? branchInfo, bool isBranch, int branchChannel, int indent,
                 int branchInputChannelIndex, bool canLinkToBranchInput, int branchInputMaxSourcePosToLinkWith, int valuesPushedOntoBranch,
                 int reach, bool isBranchTarget, TargetInfo? branchTargetInfo, int numChannelsForBranchToFeed)
             {
@@ -445,17 +448,17 @@ public static class ILStackVisualizer
                                 {
                                     if (canLinkToBranchInput && prams.SourceInstruction.Position > pos)
                                     {
-                                        pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - pushed };
+                                        pramsToConsume[j] = prams.Reduce(valuesPushedOntoBranch);
                                         if (feedingToBranchInput || feedingDup || reached || feedingBranchToChannel)
                                         {
-                                            if (prams.RemainingParams > 1)
+                                            if (pramsToConsume[j].RemainingParams > 0)
                                                 sb2.Append("┼───");
                                             else
                                                 sb2.Append("┬───");
                                         }
                                         else
                                         {
-                                            if (prams.RemainingParams > 1)
+                                            if (pramsToConsume[j].RemainingParams > 0)
                                                 sb2.Append("├───");
                                             else
                                                 sb2.Append("┌───");
@@ -570,7 +573,7 @@ public static class ILStackVisualizer
                             {
                                 sb2.Append("────");
                             }
-                            else if (reach > 0 && prams.Indent == pramsToConsume.Count - reach)
+                            else if (reach > 0 && prams.Indent == indent - reach)
                             {
                                 reached = true;
                                 sb2.Append("  ┌─");
@@ -588,7 +591,7 @@ public static class ILStackVisualizer
                                 {
                                     if (canLinkToBranchInput && prams.SourceInstruction.Position > pos)
                                     {
-                                        pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - pushed };
+                                        pramsToConsume[j] = prams.Reduce(pushed);
                                         sb2.Append("┼───");
                                     }
                                     else if (prams.SourceInstruction.Position == pos) // Beginning of the input channel
@@ -603,18 +606,18 @@ public static class ILStackVisualizer
                             {
                                 if (canLinkToBranchInput && prams.SourceInstruction.Position > pos && prams.SourceInstruction.Position <= branchInputMaxSourcePosToLinkWith)
                                 {
-                                    pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - valuesPushedOntoBranch };
+                                    pramsToConsume[j] = prams.Reduce(valuesPushedOntoBranch);
                                     if (!(feedingToBranchInput || feedingDup || reached))
                                     {
                                         feedingToBranchInput = true;
-                                        if (prams.RemainingParams > 1)
+                                        if (pramsToConsume[j].RemainingParams > 0)
                                             sb2.Append("├───");
                                         else
                                             sb2.Append("┌───");
                                     }
                                     else
                                     {
-                                        if (prams.RemainingParams > 1)
+                                        if (pramsToConsume[j].RemainingParams > 0)
                                             sb2.Append("┼───");
                                         else
                                             sb2.Append("┬───");
@@ -631,14 +634,14 @@ public static class ILStackVisualizer
                             }
                             else if (isBranchTarget)
                             {
-                                if (branchIndent == prams.Indent)
+                                if (indent == prams.Indent)
                                     sb2.Append("─┐│");
                                 else if (linkedWithChannel)
                                     sb2.Append("──│─");
                                 else
                                     sb2.Append("  │ ");
                             }
-                            else if (reach > 0 && prams.Indent == pramsToConsume.Count - reach)
+                            else if (reach > 0 && prams.Indent == indent - reach)
                             {
                                 reached = true;
                                 sb2.Append("  ├─");
@@ -684,7 +687,7 @@ public static class ILStackVisualizer
 
                                 if (targetInfo.BranchCount == 0)
                                 {
-                                    pramsToConsume[j] = pramsToConsume[j] with { RemainingParams = 0, IsBranchInput = false, FeedsFromBranchIndex = -1 };
+                                    pramsToConsume[j] = pramsToConsume[j].Set(0);
                                     sb2.Append("┬───");
                                 }
                                 else
@@ -732,7 +735,7 @@ public static class ILStackVisualizer
                 }
 
                 // For ret in particular. Need to indent the instruction when it is sitting drectly in the channel of the incoming branch pipe (the pipe needs room to do a little dog leg)
-                int remainingBranchTargetIndent = branchIndent - pramsToConsume.Count;
+                int remainingBranchTargetIndent = indent - pramsToConsume.Count;
                 for (int i = 0; i < remainingBranchTargetIndent; i++)
                 {
                     if (isBranch || isBranchTarget)
@@ -740,15 +743,11 @@ public static class ILStackVisualizer
                         // No more channels on the stack, so need to manually pipe across to the label
                         if (isBranchTarget && i == remainingBranchTargetIndent - 1)
                         {
-                            if (!noLongerFeedingBranchToChannel)
-                                sb2.Append("─┐");
+                            sb2.Append("─┐");
 
                             if (branchTargetInfo != null && branchTargetInfo.IncomingDepth > 0)
                             {
-                                if (noLongerFeedingBranchToChannel)
-                                    sb2.Append(">>");
-                                else
-                                    sb2.Append(" >>");
+                                sb2.Append(" >>");
 
                                 int incomingStack = branchTargetInfo.IncomingDepth - popped;
                                 if (incomingStack > 0)
@@ -760,7 +759,7 @@ public static class ILStackVisualizer
                             sb2.Append("────");
                         }
                     }
-                    else if (!reached && reach > 0)
+                    else if (reach > 0)
                     {
                         sb2.Append("────");
                     }
@@ -785,7 +784,7 @@ public static class ILStackVisualizer
 
             if (isBranch && branchChannelIndexToRemove >= 0)
             {
-                pramsToConsume[branchChannelIndexToRemove] = pramsToConsume[branchChannelIndexToRemove] with { RemainingParams = 0, IsBranchInput = false, FeedsFromBranchIndex = -1 };
+                pramsToConsume[branchChannelIndexToRemove] = pramsToConsume[branchChannelIndexToRemove].Set(0);
             }
 
             if (isBranchTarget)
@@ -819,7 +818,7 @@ public static class ILStackVisualizer
                 PrintPipes(sb3, pos, instruction.Depth, popped: 0, pushed: 0, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor: true,
                     branchInfo: null, isBranch: false, branchChannel: 0, indent + 1,
                     branchInputChannelIndex: -1, canLinkToBranchInput: false, branchInputMaxSourcePosToLinkWith: -1, valuesPushedOntoBranch: 0, reach: 0, isBranchTarget, targetInfo, numChannelsForBranchToFeed);
-                pipes[i].Insert(0, $"    {sb3}");
+                pipes[i].Insert(0, $"{sb3}");
                 items.Add(new(0, 0, indent + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry, so will be printed above it
 
                 if (branchTargetChannelIndexToRemove >= 0)
@@ -841,7 +840,7 @@ public static class ILStackVisualizer
                 else
                     sb4.Append("  │ ");
             }
-            pipes[i].Insert(0, $"    {sb4}");
+            pipes[i].Insert(0, $"{sb4}");
 
             while (pramsToConsume.Count > 0 && pramsToConsume.LastOrDefault().RemainingParams == 0)
             {
@@ -865,12 +864,14 @@ public static class ILStackVisualizer
 
             if (isBranchTarget)
             {
-                sb.AppendLine($"{new string(' ', 2 + maxDigits + 1 + 2 + 4 + 1 + 2 + 4)}{str}");
+                sb.AppendLine($"{new string(' ', 2 + maxStackDigits + 1 + 2 + maxPosDigitsHex + 1 + 2 + maxPosDigitsDecimal)}{str}");
             }
             else
             {
-                string depfth = dep.ToString().PadLeft(maxDigits);
-                sb.AppendLine($"[{depfth}] <{pos:X4}> <{pos.ToString(),4}>{str}");
+                string depfth = dep.ToString().PadLeft(maxStackDigits);
+                string posx = pos.ToString("X4").PadLeft(maxPosDigitsHex);
+                string posd = pos.ToString().PadLeft(maxPosDigitsDecimal);
+                sb.AppendLine($"[{depfth}] <{posx}> <{posd}>{str}");
             }
         }
     }
