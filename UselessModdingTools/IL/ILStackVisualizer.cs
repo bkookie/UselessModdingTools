@@ -7,6 +7,7 @@ namespace UselessModdingTools.IL;
 
 internal readonly record struct Item(int Depth, int Pos, int Indent, string Text, bool IsBranchTarget);
 internal readonly record struct Params(int Indent, int RemainingParams); // RemainingParams is dual purpose; when negative, instead is the mapkey of a branchTarget channel
+#warning Indent property seems redundant. It is identical to its index in the pramsToConsume list
 
 public static class ILStackVisualizer
 {
@@ -109,9 +110,8 @@ public static class ILStackVisualizer
 
                 bool isBranch = false;
                 int branchChannel = 0;
-                int remainingBranchCount = 0;
                 int branchChannelIndex = 0;
-                Params? channelToRemove = null;
+                Params? channelToRemove = null; // misnomer; stores an empty channel that will replace an existing channel (used with branchChannelIndex). not even necessary (just need the index)
                 Params? channelToInsert = null;
                 if (BasicILScanner.IsBranch(instruction.OpCode) && instruction.Branch != null)
                 {
@@ -153,7 +153,6 @@ public static class ILStackVisualizer
                         }
 
                         info.Count -= numBranchPaths;
-                        remainingBranchCount = info.Count;
 
                         if (targetPos < pos)
                         {
@@ -244,6 +243,9 @@ public static class ILStackVisualizer
                         {
                             //throw new InvalidOperationException("This target already mapped???");
 
+                            // This may be hit if an instruction is targeted by both forward and back branches
+#warning Unlikely to be handled properly
+
                             targetInfo.Count--;
                             if (targetInfo.Count == 0)
                             {
@@ -294,7 +296,7 @@ public static class ILStackVisualizer
 
                 StringBuilder sb2 = new();
                 sb2.Append("    ");
-                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, instruction.Branch, isBranch, branchChannel, remainingBranchCount, indent, isBranchTarget: false, null);
+                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, instruction.Branch, isBranch, branchChannel, indent, isBranchTarget: false, null);
                 int extraIndent = indent - pramsToConsume.Count;
                 if (!pramsToConsume.Any(p => p.RemainingParams >= 0))
                 {
@@ -304,11 +306,12 @@ public static class ILStackVisualizer
                 }
                 sb2.Append(InstructionToString(baseMethod, instruction));
 
-                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, Branch? branchInfo, bool isBranch, int branchChannel, int remainingBranchCount, int branchIndent, bool isBranchTarget, TargetInfo? branchTargetInfo)
+                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, Branch? branchInfo, bool isBranch, int branchChannel, int branchIndent, bool isBranchTarget, TargetInfo? branchTargetInfo)
                 {
-                    Dictionary<int, TargetInfo> map = [];
+                    Dictionary<int, TargetInfo>? map = null;
                     if (branchInfo.HasValue)
                     {
+                        map = [];
                         foreach (TargetInfo info in branchInfo.Value)
                         {
                             // only used for switches?
@@ -376,10 +379,13 @@ public static class ILStackVisualizer
                             }
                             else if (isBranch && branchChannel == prams.RemainingParams)
                             {
+                                if (branchInfo == null)
+                                    throw new InvalidOperationException($"{nameof(branchInfo)} should not be null");
+
                                 linkedWithChannel = true;
-                                if (branchInfo != null && branchInfo.Value.TargetInfo.Target < branchInfo.Value.Position)
+                                if (branchInfo.Value.TargetInfo.Target < branchInfo.Value.Position)
                                     sb2.Append("└───");
-                                else if (remainingBranchCount == 0)
+                                else if (branchInfo.Value.TargetInfo.Count == 0)
                                     sb2.Append("┌───");
                                 else
                                     sb2.Append("├───");
@@ -507,7 +513,7 @@ public static class ILStackVisualizer
                     }
                     StringBuilder sb3 = new();
                     sb3.Append("    ");
-                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, null, isBranch: false, 0, 0, indent + 1, isBranchTarget, targetInfo);
+                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, null, isBranch: false, 0, indent + 1, isBranchTarget, targetInfo);
                     //sb3.Append("─┐");
                     items.Add(new(0, 0, channelIndex + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry
 

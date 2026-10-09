@@ -62,9 +62,10 @@ public static class BasicILScanner
 
     static BasicILScanner()
     {
-        foreach (var f in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))
+        foreach (FieldInfo field in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))
         {
-            ops[((OpCode)f.GetValue(null)!).Value] = (OpCode)f.GetValue(null)!;
+            OpCode op = (OpCode)field.GetValue(null)!;
+            ops[op.Value] = op;
         }
 
         StoreLoadReciprocals = [];
@@ -185,24 +186,24 @@ public static class BasicILScanner
                 }
 
                 branch = new(pos, info, switchInfo);
-            }
 
-            static void AddTarget(Dictionary<int, TargetInfo> branchTargets, int targetPos, int depth, out TargetInfo info)
-            {
-                if (!branchTargets.TryGetValue(targetPos, out TargetInfo? targetInfo)) // Target depth takes the max of all incoming branch depths (but i think they should all be the same?)
+                static void AddTarget(Dictionary<int, TargetInfo> branchTargets, int targetPos, int depth, out TargetInfo info)
                 {
-                    targetInfo = new(targetPos, 1, depth);
-                    branchTargets[targetPos] = targetInfo;
-                }
-                else
-                {
-                    targetInfo.Count++;
-                    if (depth > targetInfo.IncomingDepth)
+                    if (!branchTargets.TryGetValue(targetPos, out TargetInfo? targetInfo)) // Target depth takes the max of all incoming branch depths (but i think they should all be the same?)
                     {
-                        targetInfo.IncomingDepth = depth;
+                        targetInfo = new(targetPos, 1, depth);
+                        branchTargets[targetPos] = targetInfo;
                     }
+                    else
+                    {
+                        targetInfo.Count++;
+                        if (depth > targetInfo.IncomingDepth)
+                        {
+                            targetInfo.IncomingDepth = depth;
+                        }
+                    }
+                    info = targetInfo;
                 }
-                info = targetInfo;
             }
 
             instructions.Add(new(op, operand, text, p, depth, branch, exeption));
@@ -503,8 +504,6 @@ public static class BasicILScanner
             StackBehaviour.Varpush => MethodPushDepth(opCode, called),
             _ => throw new InvalidEnumArgumentException(),
         };
-        if (opCode == OpCodes.Leave_S)
-            ;
         return push;
     }
 
