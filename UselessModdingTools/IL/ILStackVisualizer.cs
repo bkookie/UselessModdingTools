@@ -12,7 +12,7 @@ internal readonly record struct Item(int Depth, int Pos, int Indent, string Text
 //  - When negative, is the mapkey of a branchTarget channel
 //  - When positive and IsBranchInput = true, is a branch input channel, with value equal to the remaining stack size to traverse the branch
 //  - Otherwise when positve, value is the remaining stack size for the prior pop instruction
-internal readonly record struct Params(int Indent, int RemainingParams, int SourcePos, bool IsBranch, bool IsBranchInput, int FeedsFromBranchIndex);
+internal readonly record struct Params(int Indent, int RemainingParams, bool IsBranch, bool IsBranchInput, int FeedsFromBranchIndex, Instruction SourceInstruction);
 
 public static class ILStackVisualizer
 {
@@ -34,7 +34,7 @@ public static class ILStackVisualizer
         string methodName = $"{baseMethod.DeclaringType}.{baseMethod.Name}";
 #if DEBUG
         currentMethod = methodName;
-        if (currentMethod.StartsWith(debugMethod))
+        if (currentMethod.Contains(debugMethod))
             ;
 #endif
         if (!BasicILScanner.TryReadIL(baseMethod, out int maxStackDepth, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
@@ -68,7 +68,7 @@ public static class ILStackVisualizer
         string fullName = BasicILScanner.GetMethodFullName(reader, mdef);
 #if DEBUG
         currentMethod = fullName;
-        if (debugMethod.Contains(currentMethod))
+        if (debugMethod.Contains(currentMethod) || currentMethod.Contains(debugMethod))
             ;
 #endif
         if (!BasicILScanner.TryReadIL(reader, mdef, body, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
@@ -186,7 +186,7 @@ public static class ILStackVisualizer
                         info.BackBranches += numBranchPathsToThisTarget;
 
                         int branchChannelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams < 0) + 1;
-                        pramsToConsume.Insert(branchChannelIndex, new(branchChannelIndex + 1, branchChannel, SourcePos: pos, isBranch, IsBranchInput: false, FeedsFromBranchIndex: -1));
+                        pramsToConsume.Insert(branchChannelIndex, new(branchChannelIndex + 1, branchChannel, isBranch, IsBranchInput: false, FeedsFromBranchIndex: -1, SourceInstruction: instruction));
 
                         if (branchChannelIndex == indent)
                             indent++;
@@ -204,12 +204,12 @@ public static class ILStackVisualizer
 
                         if (branchInputChannelIndex >= 0 && branchInputChannelIndex > pramsToConsume.FindIndex(p => p.RemainingParams == branchChannel))
                         {
-                            pramsToConsume[branchInputChannelIndex] = new(branchInputChannelIndex + 1, instruction.Depth, SourcePos: pos, IsBranch: false, IsBranchInput: true, FeedsFromBranchIndex: -1);
+                            pramsToConsume[branchInputChannelIndex] = new(branchInputChannelIndex + 1, instruction.Depth, IsBranch: false, IsBranchInput: true, FeedsFromBranchIndex: -1, SourceInstruction: instruction);
                         }
                         else
                         {
                             branchInputChannelIndex = pramsToConsume.Count;
-                            pramsToConsume.Add(new(branchInputChannelIndex + 1, instruction.Depth, SourcePos: pos, IsBranch: false, IsBranchInput: true, FeedsFromBranchIndex: -1));
+                            pramsToConsume.Add(new(branchInputChannelIndex + 1, instruction.Depth, IsBranch: false, IsBranchInput: true, FeedsFromBranchIndex: -1, SourceInstruction: instruction));
                         }
 
                         if (branchInputChannelIndex == indent)
@@ -241,7 +241,7 @@ public static class ILStackVisualizer
                 sortedParams.Sort(Comparer<Params>.Create((x, y) =>
                 {
                     // Sort channels based on which will be hit first logically (as opposed to visually by following the pipes)
-                    int cmp = x.SourcePos.CompareTo(y.SourcePos);
+                    int cmp = x.SourceInstruction.Position.CompareTo(y.SourceInstruction.Position);
                     if (cmp != 0) return cmp;
                     return x.IsBranchInput.CompareTo(y.IsBranchInput);
                 }));
@@ -250,7 +250,7 @@ public static class ILStackVisualizer
                 {
                     Params pram = sortedParams[m]; // 'm' now relates to the sorted list; do not use it to access the orignal list
 
-                    if (pram.IsBranchInput && (remainingPush > 0 || pram.SourcePos <= posLastPushedTo))
+                    if (pram.IsBranchInput && (remainingPush > 0 || pram.SourceInstruction.Position <= posLastPushedTo))
                     {
                         if (!foundBranch)
                         {
@@ -258,12 +258,12 @@ public static class ILStackVisualizer
                             valuesPushedOntoBranch = remainingPush;
                         }
 
-                        branchInputMaxSourcePosToLinkWith = pram.SourcePos;
+                        branchInputMaxSourcePosToLinkWith = pram.SourceInstruction.Position;
                     }
                     else if (pram.RemainingParams > 0 && remainingPush > 0)
                     {
                         remainingPush -= pram.RemainingParams;
-                        posLastPushedTo = pram.SourcePos;
+                        posLastPushedTo = pram.SourceInstruction.Position;
 
                         if (!foundBranch && pram.IsBranch)
                         {
@@ -343,7 +343,7 @@ public static class ILStackVisualizer
 
                         if (branchTargetChannelIndex != -1)
                         {
-                            newBranchParams = new(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, SourcePos: pos, IsBranch: false, IsBranchInput: false, FeedsFromBranchIndex: -1);
+                            newBranchParams = new(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, IsBranch: false, IsBranchInput: false, FeedsFromBranchIndex: -1, SourceInstruction: instruction);
                         }
                         else
                         {
@@ -351,7 +351,7 @@ public static class ILStackVisualizer
                             // Must Insert to the (current) end of the list (do not use Add). This way, if the instruction pops and adds a new channel, this will be inserted in front of it.
                             insertChannel = true;
                             branchTargetChannelIndex = pramsToConsume.Count;
-                            newBranchParams = new Params(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, SourcePos: pos, IsBranch: false, IsBranchInput: false, FeedsFromBranchIndex: -1);
+                            newBranchParams = new Params(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, IsBranch: false, IsBranchInput: false, FeedsFromBranchIndex: -1, SourceInstruction: instruction);
                         }
 
                         if (branchTargetChannelIndex == indent)
@@ -427,7 +427,7 @@ public static class ILStackVisualizer
                             {
                                 if (prams.IsBranchInput)
                                 {
-                                    if (canLinkToBranchInput && prams.SourcePos > pos)
+                                    if (canLinkToBranchInput && prams.SourceInstruction.Position > pos)
                                     {
                                         pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - pushed };
                                         if (feedingToBranchInput || feedingDup || reached)
@@ -562,12 +562,12 @@ public static class ILStackVisualizer
                             {
                                 if (prams.IsBranchInput)
                                 {
-                                    if (canLinkToBranchInput && prams.SourcePos > pos)
+                                    if (canLinkToBranchInput && prams.SourceInstruction.Position > pos)
                                     {
                                         pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - pushed };
                                         sb2.Append("┼───");
                                     }
-                                    else if (prams.SourcePos == pos) // Beginning of the input channel
+                                    else if (prams.SourceInstruction.Position == pos) // Beginning of the input channel
                                         sb2.Append("┴───");
                                     else
                                         sb2.Append("│───"); // A passing input channel
@@ -577,7 +577,7 @@ public static class ILStackVisualizer
                             }
                             else if (prams.IsBranchInput)
                             {
-                                if (canLinkToBranchInput && prams.SourcePos > pos && prams.SourcePos <= branchInputMaxSourcePosToLinkWith)
+                                if (canLinkToBranchInput && prams.SourceInstruction.Position > pos && prams.SourceInstruction.Position <= branchInputMaxSourcePosToLinkWith)
                                 {
                                     pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - valuesPushedOntoBranch };
                                     if (!(feedingToBranchInput || feedingDup || reached))
@@ -738,7 +738,7 @@ public static class ILStackVisualizer
 
             if (popped > 0 && !instruction.StackReset && !instruction.IsExceptionHandlerLead) // The instruction leading an exeption handler consumes a value pushed by the CLR externally to the method (dont try to trace it)
             {
-                pramsToConsume.Add(new(pramsToConsume.Count + 1 + extraIndent, popped, SourcePos: pos, isBranch, IsBranchInput: false, FeedsFromBranchIndex: -1));
+                pramsToConsume.Add(new(pramsToConsume.Count + 1 + extraIndent, popped, isBranch, IsBranchInput: false, FeedsFromBranchIndex: -1, SourceInstruction: instruction));
                 if (pramsToConsume.Count > maxIndent)
                     maxIndent++;
             }
