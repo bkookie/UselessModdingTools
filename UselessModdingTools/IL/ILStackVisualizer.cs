@@ -533,38 +533,41 @@ public static class ILStackVisualizer
                                 feedingBranchToChannel = true;
                                 if (j < prams.FeedsFromBranchIndex)
                                 {
-                                    sb2.Append("  ┌─");
+                                    if (prams.IsBranchInput)
+                                        sb2.Append("┌───");
+                                    else
+                                        sb2.Append("  ┌─");
                                 }
                                 else if (j > prams.FeedsFromBranchIndex)
                                 {
-                                    if (numChannelsForBranchToFeed > 0)
-                                        sb2.Append("──┬─");
+                                    if (prams.IsBranchInput)
+                                        sb2.Append("┬───");
                                     else
-                                    {
                                         sb2.Append("──┬─");
+
+                                    if (numChannelsForBranchToFeed == 0)
                                         noLongerFeedingBranchToChannel = true;
-                                        //feedingBranchToChannel = false;
-                                        //feedingFromChannelIndex = -1;
-                                    }
+                                    //feedingBranchToChannel = false;
+                                    //feedingFromChannelIndex = -1;
                                 }
                                 else
                                 {
-                                    if (numChannelsForBranchToFeed > 0)
-                                        sb2.Append("└─┬─");
+                                    // Not supposed to be possible to hit this, i dont think
+                                    if (prams.IsBranchInput)
+                                        sb2.Append("├───");
                                     else
-                                    {
                                         sb2.Append("└─┬─");
-                                    }
                                 }
-                            }
-                            else if (j > feedingFromChannelIndex && numChannelsForBranchToFeed == 0)
-                            {
-                                sb2.Append("──┬─");
-                                noLongerFeedingBranchToChannel = true;
                             }
                             else
                             {
-                                sb2.Append("──┬─");
+                                if (prams.IsBranchInput)
+                                    sb2.Append("┬───");
+                                else
+                                    sb2.Append("──┬─");
+
+                                if (j > feedingFromChannelIndex && numChannelsForBranchToFeed == 0)
+                                    noLongerFeedingBranchToChannel = true;
                             }
                         }
                         else if (prams.RemainingParams == 0)
@@ -798,19 +801,29 @@ public static class ILStackVisualizer
                 }
 
                 int numChannelsForBranchToFeed = 0;
+                int numChannelsToCleanUp = 0;
                 if (carryOverPushAmount > 0)
                 {
                     for (int j = pramsToConsume.Count - 1; j >= 0 && carryOverPushAmount > 0; j--)
                     {
                         Params prams = pramsToConsume[j];
-                        if (prams.RemainingParams > 0 && !prams.IsBranchInput)
+                        if (prams.RemainingParams > 0)
                         {
                             int push = Math.Min(carryOverPushAmount, prams.RemainingParams);
-                            pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - push, FeedsFromBranchIndex = branchTargetChannelIndex };
+                            // TODO: dont save FeedsFromBranchIndex as a Params property when it is only temporary (for this instr only). Track it separately.
                             numChannelsForBranchToFeed++;
-                            carryOverPushAmount -= push;
+                            numChannelsToCleanUp++;
+                            pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - push, FeedsFromBranchIndex = branchTargetChannelIndex };
+                            if (!prams.IsBranchInput)
+                            {
+                                carryOverPushAmount -= push;
+                            }
                         }
                     }
+
+                    if (carryOverPushAmount > 0)
+#warning need to do something with this
+                        ;
                 }
 
                 StringBuilder sb3 = new();
@@ -823,7 +836,27 @@ public static class ILStackVisualizer
 
                 if (branchTargetChannelIndexToRemove >= 0)
                 {
-                    pramsToConsume[branchTargetChannelIndexToRemove] = pramsToConsume[branchTargetChannelIndexToRemove] with { RemainingParams = 0, IsBranchInput = false, FeedsFromBranchIndex = -1 };
+                    pramsToConsume[branchTargetChannelIndexToRemove] = pramsToConsume[branchTargetChannelIndexToRemove].Set(0);
+                }
+
+                if (numChannelsToCleanUp > 0)
+                {
+                    // Clean up (do not let any expired values remain - they are only valid for this instruction)
+                    // See above TODO
+                    for (int j = 0; j < pramsToConsume.Count; j++)
+                    {
+                        Params pram = pramsToConsume[j];
+                        if (pram.FeedsFromBranchIndex >= 0 && pram.RemainingParams == 0)
+                        {
+                            pramsToConsume[j] = pram.Set(0);
+                            numChannelsToCleanUp--;
+                            if (numChannelsToCleanUp == 0)
+                                break;
+                        }
+                    }
+
+                    if (numChannelsToCleanUp > 0)
+                        throw new InvalidOperationException($"Could not clean up all entries".AsErrorMsg());
                 }
             }
 
