@@ -5,24 +5,25 @@ using System.Text;
 
 namespace UselessModdingTools.IL;
 
-//internal readonly record struct StackEntry(int DepthAfter, Instruction Instruction);
-
 internal readonly record struct Item(int Depth, int Pos, int Indent, string Text, bool IsBranchTarget);
 
 // Indent property seems redundant. It is identical to its index (with an offset) in the pramsToConsume list. But it has its uses. keep for now
-internal readonly record struct Params(int Indent, int RemainingParams, int SourcePos, bool IsBranch, bool IsBranchInput); // RemainingParams is dual purpose; when negative, instead is the mapkey of a branchTarget channel
-
-//internal readonly record struct Channel(ChannelType ChannelType, int value);
-
-//internal enum ChannelType
-//{
-//    Parameter,
-//    Branch,
-//    PreBranchParam
-//}
+// RemainingParams is multi-purpose:
+//  - When negative, is the mapkey of a branchTarget channel
+//  - When positive and IsBranchInput = true, is a branch input channel, with value equal to the remaining stack size to traverse the branch
+//  - Otherwise when positve, value is the remaining stack size for the prior pop instruction
+internal readonly record struct Params(int Indent, int RemainingParams, int SourcePos, bool IsBranch, bool IsBranchInput);
 
 public static class ILStackVisualizer
 {
+#if DEBUG
+    //private const string debugMethod = "UselessModdingTools.IL.ILStackVisualizer.ReadMethod";
+    //private const string debugMethod = "UselessModdingTools.IL.BasicILScanner.TryReadIL";
+    private const string debugMethod = "Godot.Bridge.ScriptManagerBridge.GetScriptTypeInfo";
+
+    private static string currentMethod = "";
+#endif
+
     public static string ReadMethod(MethodInfo baseMethod, VisualizerMode mode, out SortedList<int, List<string>>? pipes)
     {
         pipes = null;
@@ -30,56 +31,16 @@ public static class ILStackVisualizer
         if (baseMethod == null)
             return "";
 
-        //if (baseMethod.DeclaringType?.Namespace?.StartsWith("Godot") == true)
-        //    return "";
-
-        string debugMethod = "UselessModdingTools.IL.ILStackVisualizer.ReadMethod";
-        //string debugMethod = "UselessModdingTools.IL.BasicILScanner.TryReadIL";
-
-        if ($"{baseMethod.DeclaringType}.{baseMethod.Name}".StartsWith(debugMethod))
+        string methodName = $"{baseMethod.DeclaringType}.{baseMethod.Name}";
+#if DEBUG
+        currentMethod = methodName;
+        if (currentMethod.StartsWith(debugMethod))
             ;
-        //else
-        //    return "";
-
-        if (!BasicILScanner.TryReadIL(baseMethod, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
+#endif
+        if (!BasicILScanner.TryReadIL(baseMethod, out int maxStackDepth, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
             return $"Error: Could not read method '{baseMethod.Name}'.\n";
 
-        //Ignore branching for now
-        if (!instructions.Select(i => i.OpCode).Any(op => BasicILScanner.IsBranch(op)))
-            return "";
-
-        //if (instructions.Count > 10)
-        //    return "";
-
-        //List<StackEntry> entries = [];
-        //int depth = 0;
-        int maxDepth = instructions.Max(i => i.Depth);
-
-        //for (int i = 0; i < instructions.Count; i++)
-        //{
-        //    Instruction instruction = instructions[i];
-
-        //    int depthBefore = depth;
-
-        //    if (branchTargets.TryGetValue(instruction.Position, out int branchDepth))
-        //    {
-        //        //int pos = instruction.Position;
-        //        //int max = instructions.Where((instr, i) => instr.Branch.HasValue && (instr.Branch.Value.Position == pos || (instr.Branch.Value.SwitchTargets?.Contains(pos) ?? false))).Max(instr => instr.Depth);
-        //        //depth += max;
-        //        depth += branchDepth;
-        //    }
-        //    else
-        //    {
-        //    }
-        //    depth += BasicILScanner.NetStackDepth(baseMethod, instruction);
-
-        //    entries.Add(new(instruction.Depth, instruction));
-        //    if (depth > maxDepth)
-        //        maxDepth = depth;
-        //}
-
         StringBuilder sb = new();
-        string methodName = $"{baseMethod.DeclaringType}.{baseMethod.Name}";
         string sig = baseMethod.ToString()!;
         int len = Math.Max(methodName.Length, sig.Length);
         sb.Append("┌─").Append(new string('─', len)).AppendLine("─┐");
@@ -90,18 +51,11 @@ public static class ILStackVisualizer
 
         if (mode == VisualizerMode.StackDepth)
         {
-            // Is this even useful?
-
-            //for (int i = 0; i < entries.Count; i++)
-            //{
-            //    StackEntry entry = entries[i];
-            //    depth = entry.Depth;
-            //    sb.AppendLine($"[{depth}]{depth.Tab(entries, i - 1)}{InstructionToString(baseMethod, entry.Instruction)}");
-            //}
+            GraphStackDepth();
         }
         else
         {
-            Graph(sb, methodName, debugMethod, baseMethod, null, instructions, branchTargets, out pipes);
+            GraphCFG(sb, methodName, maxStackDepth, instructions, branchTargets, out pipes);
         }
 
         return sb.ToString();
@@ -111,109 +65,58 @@ public static class ILStackVisualizer
     {
         pipes = null;
 
-        TypeDefinitionHandle typeHandle = mdef.GetDeclaringType();
-        StringHandle tStringHandle = reader.GetTypeDefinition(typeHandle).Name;
-        StringHandle mStringHandle = mdef.Name;
-        string typeName = reader.GetString(tStringHandle);
-        string methodName = reader.GetString(mStringHandle);
-        string fullName = $"{typeName}.{methodName}";
-
-        //if (baseMethod == null)
-        //    return "";
-
-        //if (baseMethod.DeclaringType?.Namespace?.StartsWith("Godot") == true)
-        //    return "";
-
-        string debugMethod = "UselessModdingTools.IL.ILStackVisualizer.ReadMethod";
-        //string debugMethod = "UselessModdingTools.IL.BasicILScanner.TryReadIL";
-
-        if (debugMethod.Contains(fullName))
+        string fullName = BasicILScanner.GetMethodFullName(reader, mdef);
+#if DEBUG
+        currentMethod = fullName;
+        if (debugMethod.Contains(currentMethod))
             ;
-
-        //if ($"{baseMethod.DeclaringType}.{baseMethod.Name}".StartsWith(debugMethod))
-        //    ;
-        //else
-        //    return "";
-
+#endif
         if (!BasicILScanner.TryReadIL(reader, mdef, body, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
             return $"Error: Could not read method '{fullName}'.\n";
 
-        //Ignore branching for now
-        //if (!instructions.Select(i => i.OpCode).Any(op => BasicILScanner.IsBranch(op)))
-        //    return "";
-
-        //if (instructions.Count > 10)
-        //    return "";
-
-        //List<StackEntry> entries = [];
-        //int depth = 0;
-        //int maxDepth = instructions.Max(i => i.Depth);
-
-        //for (int i = 0; i < instructions.Count; i++)
-        //{
-        //    Instruction instruction = instructions[i];
-
-        //    int depthBefore = depth;
-
-        //    if (branchTargets.TryGetValue(instruction.Position, out int branchDepth))
-        //    {
-        //        //int pos = instruction.Position;
-        //        //int max = instructions.Where((instr, i) => instr.Branch.HasValue && (instr.Branch.Value.Position == pos || (instr.Branch.Value.SwitchTargets?.Contains(pos) ?? false))).Max(instr => instr.Depth);
-        //        //depth += max;
-        //        depth += branchDepth;
-        //    }
-        //    else
-        //    {
-        //    }
-        //    depth += BasicILScanner.NetStackDepth(baseMethod, instruction);
-
-        //    entries.Add(new(instruction.Depth, instruction));
-        //    if (depth > maxDepth)
-        //        maxDepth = depth;
-        //}
-
         StringBuilder sb = new();
-        //string methodName = $"{baseMethod.DeclaringType}.{baseMethod.Name}";
-        //string sig = baseMethod.ToString()!;
-        //BlobReader sigBlobReader = reader.GetBlobReader(mdef.Signature);
-        //sigBlobReader.ReadSignatureHeader();
-        //sigBlobReader.ReadCompressedInteger();
-        //string sig = baseMethod.ToString()!;
-        //int len = Math.Max(methodName.Length, sig.Length);
-        int len = fullName.Length;
+        string sig = BasicILScanner.GetMethodSignatureAsString(reader, mdef);
+        int len = Math.Max(fullName.Length, sig.Length);
         sb.Append("┌─").Append(new string('─', len)).AppendLine("─┐");
         sb.Append("│ ").Append(fullName).Append(new string(' ', len - fullName.Length + 1)).AppendLine("│");
-        //sb.Append("├─").Append(new string('─', len)).AppendLine("─┤"); ;
-        //sb.Append("│ ").Append(sig).Append(new string(' ', len - sig.Length + 1)).AppendLine("│");
+        sb.Append("├─").Append(new string('─', len)).AppendLine("─┤"); ;
+        sb.Append("│ ").Append(sig).Append(new string(' ', len - sig.Length + 1)).AppendLine("│");
         sb.Append("└─").Append(new string('─', len)).AppendLine("─┘"); ;
 
         if (mode == VisualizerMode.StackDepth)
         {
-            // Is this even useful?
-
-            //for (int i = 0; i < entries.Count; i++)
-            //{
-            //    StackEntry entry = entries[i];
-            //    depth = entry.Depth;
-            //    sb.AppendLine($"[{depth}]{depth.Tab(entries, i - 1)}{InstructionToString(baseMethod, entry.Instruction)}");
-            //}
+            GraphStackDepth();
         }
         else
         {
-            Graph(sb, fullName, debugMethod, null, reader, instructions, branchTargets, out pipes);
+            GraphCFG(sb, fullName, body.MaxStack, instructions, branchTargets, out pipes);
         }
 
         return sb.ToString();
     }
 
-    private static void Graph(StringBuilder sb, string methodName, string debugMethod, MethodInfo? baseMethod, MetadataReader? reader, List<Instruction> instructions, Dictionary<int, TargetInfo> branchTargets, out SortedList<int, List<string>>? pipes)
+    private static void GraphStackDepth()
     {
-        //if (methodName.StartsWith(debugMethod))
-        //    ;
-        if (debugMethod.Contains(methodName))
-            ;
+        // Is this even useful?
+        throw new NotImplementedException();
 
-        int maxDepth = instructions.Max(i => i.Depth);
+        //for (int i = 0; i < entries.Count; i++)
+        //{
+        //    StackEntry entry = entries[i];
+        //    depth = entry.Depth;
+        //    sb.AppendLine($"[{depth}]{depth.Tab(entries, i - 1)}{InstructionToString(baseMethod, entry.Instruction)}");
+        //}
+    }
+
+    private static void GraphCFG(StringBuilder sb, string methodName, int maxStackDepth, List<Instruction> instructions, Dictionary<int, TargetInfo> branchTargets, out SortedList<int, List<string>>? pipes)
+    {
+#if DEBUG
+        if (debugMethod.Contains(currentMethod) || currentMethod.Contains(debugMethod))
+            ;
+#endif
+
+        int maxDigits = Math.Max(0, maxStackDepth.ToString().Length);
+
         int maxIndent = 0;
         int channelId = 0; // Provides a unique id for channel mapping
         List<Params> pramsToConsume = [];
@@ -223,18 +126,12 @@ public static class ILStackVisualizer
         pipes = new(instructions.Count);
         for (int i = instructions.Count - 1; i >= 0; i--)
         {
-            Params? topStack = pramsToConsume.LastOrDefault();
-
-            //StackEntry entry = entries[i];
             Instruction instruction = instructions[i];
             int pos = instruction.Position;
-            //object? operand = BasicILScanner.GetOperand(reader, instruction.OpCode, instruction.OperandIL);
-            //MethodBase? calledMethod = operand as MethodBase;
             int pushed = instruction.Push;
             int popped = instruction.Pop;
 
             int indent = pramsToConsume.Count;
-            int remainingPrams = topStack.HasValue ? topStack.Value.RemainingParams : -1;
             bool nonContributor = false;
 
             bool isBranch = false;
@@ -244,9 +141,8 @@ public static class ILStackVisualizer
             if (BasicILScanner.IsBranch(instruction.OpCode) && instruction.Branch != null)
             {
                 // Need to route the pipes to the target
-                //pushed = instruction.SwitchTargets?.Length ?? (instruction.Target.HasValue ? 1 : 0);
 
-                int targetPos = instruction.Branch.Value.TargetInfo.Target;
+                int targetPos = instruction.Branch.Value.TargetInfo.TargetPos;
 
                 if (instruction.Branch.Value.SwitchTargets != null)
                 {
@@ -258,9 +154,9 @@ public static class ILStackVisualizer
                         Params pram = pramsToConsume[n];
                         foreach (TargetInfo inf in instruction.Branch.Value)
                         {
-                            if (pram.RemainingParams == branchMaps[inf.Target])
+                            if (pram.RemainingParams == branchMaps[inf.TargetPos])
                             {
-                                targetPos = inf.Target;
+                                targetPos = inf.TargetPos;
                                 n = pramsToConsume.Count; // break for;
                                 break;
                             }
@@ -276,14 +172,14 @@ public static class ILStackVisualizer
 
                     if (instruction.Branch.Value.SwitchTargets != null)
                     {
-                        numBranchPathsToThisTarget = instruction.Branch.Value.SwitchTargets.Count(b => b.Target == targetPos); // InlineSwitch may have multiple branches for the same target
+                        numBranchPathsToThisTarget = instruction.Branch.Value.SwitchTargets.Count(b => b.TargetPos == targetPos); // InlineSwitch may have multiple branches for the same target
                     }
                     else
                     {
                         numBranchPathsToThisTarget = 1;
                     }
 
-                    info.Count -= numBranchPathsToThisTarget;
+                    info.BranchCount -= numBranchPathsToThisTarget;
 
                     if (targetPos < pos)
                     {
@@ -295,7 +191,7 @@ public static class ILStackVisualizer
                         if (branchChannelIndex == indent)
                             indent++;
                     }
-                    else if (info.Count == 0)
+                    else if (info.BranchCount == 0)
                     {
                         PrepareToRemoveChannel(pramsToConsume, branchChannel, out branchChannelIndexToRemove);
                     }
@@ -337,7 +233,6 @@ public static class ILStackVisualizer
                 int lastIndex = pramsToConsume.Count - 1;
 
                 // Find which branches (if any) this instruction could traverse
-                //int lastIndexOfBranchInput = pramsToConsume.FindLastIndex(lastIndex, p => p.RemainingParams > 0 && p.IsBranchInput);
                 int remainingPush = pushed;
                 int posLastPushedTo = -1; // Any branches encountered at or before this position can be traversed
                 bool foundBranch = false;
@@ -419,7 +314,7 @@ public static class ILStackVisualizer
                 isBranchTarget = true;
                 int branchTargetChannel = GetChannel(branchMaps, pos, ref channelId); // channels are negative
 
-                if (targetInfo.Count <= 0)
+                if (targetInfo.BranchCount <= 0)
                 {
                     // Hit by a backwards branch, and there are no forward branches
                     PrepareToRemoveChannel(pramsToConsume, branchTargetChannel, out branchTargetChannelIndexToRemove);
@@ -435,8 +330,8 @@ public static class ILStackVisualizer
                         // This may be hit if an instruction is targeted by both forward and back branches
 #warning Unlikely to be handled properly
 
-                        targetInfo.Count--;
-                        if (targetInfo.Count == 0)
+                        targetInfo.BranchCount--;
+                        if (targetInfo.BranchCount == 0)
                         {
                             newBranchParams = pramsToConsume[branchTargetChannelIndex] with { RemainingParams = 0, IsBranchInput = false };
                         }
@@ -455,13 +350,13 @@ public static class ILStackVisualizer
                             branchTargetChannelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams < 0 || p.RemainingParams > 0 && p.IsBranchInput) + 1;
                             newBranchParams = new Params(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, SourcePos: pos, IsBranch: false, IsBranchInput: false);
                             // Careful when inserting a channel, so as not to break alignments; maybe should always just add to the end.
-                            // But haven't encountered such a situation; will leave the code as is until it breaks or I can confirm the correct handling.
-#if DEBUG
+                            // Will leave the code as is to find where it breaks, or until I can confirm the correct handling.
+
                             if (branchTargetChannelIndex < pramsToConsume.Count)
                             {
-                                throw new InvalidOperationException($"DEBUG: Inserting a channel (may break alignments). MethodName = {methodName}");
+                                throw new InvalidOperationException($"DEBUG: Inserting a channel (may break alignments). Probably indicates incorrect handling of an opcode. " +
+                                    $"MethodName = '{methodName}', OpCode = '{instruction.OpCode}', Position = '0x{pos:X4} ({pos})'".AsErrorMsg());
                             }
-#endif
                         }
 
                         if (branchTargetChannelIndex == indent)
@@ -475,20 +370,8 @@ public static class ILStackVisualizer
             PrintPipes(sb2, pos, instruction.Depth, popped, pushed, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor,
                 instruction.Branch, isBranch, branchChannel, indent,
                 branchInputChannelIndex, canLinkToBranchInput, branchInputMaxSourcePosToLinkWith, valuesPushedOntoBranch, reach, isBranchTarget: false, null);
-            pipes.Add(i, [$"[{instruction.Depth}] <{pos,4}> {sb2}"]);
-            if (baseMethod != null)
-            {
-                sb2.Append(InstructionToString(baseMethod, instruction));
-            }
-            else if (reader != null)
-            {
-                sb2.Append(InstructionToString(reader, instruction));
-            }
-            else
-            {
-                throw new InvalidOperationException("No methodInfo or reader supplied");
-            }
-            int extraIndent = indent - pramsToConsume.Count;
+            pipes.Add(i, [$"[{instruction.Depth.ToString().PadLeft(maxDigits)}] <{pos,4}> {sb2}"]);
+            sb2.Append(InstructionToString(instruction));
 
             static void PrintPipes(StringBuilder sb2, int pos, int depth, int popped, int pushed, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor,
                 Branch? branchInfo, bool isBranch, int branchChannel, int branchIndent,
@@ -503,7 +386,7 @@ public static class ILStackVisualizer
                     foreach (TargetInfo info in branchInfo.Value)
                     {
                         // only used for switches?
-                        map[branchMaps[info.Target]] = info;
+                        map[branchMaps[info.TargetPos]] = info;
                     }
                     //map = branchInfo.Value.ToDictionary(data => branchMaps[data.Target], data => data);
                 }
@@ -600,21 +483,21 @@ public static class ILStackVisualizer
                         else if (isBranch && branchChannel == prams.RemainingParams)
                         {
                             if (branchInfo == null)
-                                throw new InvalidOperationException($"{nameof(branchInfo)} should not be null");
+                                throw new InvalidOperationException($"{nameof(branchInfo)} should not be null".AsErrorMsg());
 
                             linkedWithChannel = true;
                             if (map != null && map.TryGetValue(prams.RemainingParams, out TargetInfo? targetInfo))
                             {
-                                if (targetInfo.Target < branchInfo.Value.Position)
+                                if (targetInfo.TargetPos < branchInfo.Value.Position)
                                     sb2.Append("└───");
-                                else if (targetInfo.Count == 0)
+                                else if (targetInfo.BranchCount == 0)
                                     sb2.Append("┌───");
                                 else
                                     sb2.Append("├───");
                             }
-                            else if (branchInfo.Value.TargetInfo.Target < branchInfo.Value.Position)
+                            else if (branchInfo.Value.TargetInfo.TargetPos < branchInfo.Value.Position)
                                 sb2.Append("└───");
-                            else if (branchInfo.Value.TargetInfo.Count == 0)
+                            else if (branchInfo.Value.TargetInfo.BranchCount == 0)
                                 sb2.Append("┌───");
                             else
                                 sb2.Append("├───");
@@ -716,17 +599,17 @@ public static class ILStackVisualizer
                             if (map != null && map.TryGetValue(prams.RemainingParams, out TargetInfo? targetInfo))
                             {
                                 // This should only trigger on inlineswitch
-                                // Only the left-most channel will have been processed; do the remainder here
+                                // Only the left-most channel will have been processed (or maybe it was the deepest target); either way, do the remainder here for now
                                 if (branchInfo != null && branchInfo.Value.SwitchTargets != null)
                                 {
-                                    targetInfo.Count -= branchInfo.Value.SwitchTargets.Count(b => b.Target == targetInfo.Target); // InlineSwitch may have multiple branches for the same target
+                                    targetInfo.BranchCount -= branchInfo.Value.SwitchTargets.Count(b => b.TargetPos == targetInfo.TargetPos); // InlineSwitch may have multiple branches for the same target
                                 }
                                 else
                                 {
-                                    targetInfo.Count--;
+                                    targetInfo.BranchCount--;
                                 }
 
-                                if (targetInfo.Count == 0)
+                                if (targetInfo.BranchCount == 0)
                                 {
                                     pramsToConsume[j] = pramsToConsume[j] with { RemainingParams = 0, IsBranchInput = false };
                                     sb2.Append("┬───");
@@ -746,7 +629,7 @@ public static class ILStackVisualizer
                             linkedWithChannel = true;
                             if (branchTargetInfo != null && branchTargetInfo.BackBranches > 0)
                             {
-                                if (branchTargetInfo.Count == 0)
+                                if (branchTargetInfo.BranchCount == 0)
                                     sb2.Append("┌───");
                                 else
                                     sb2.Append("├───");
@@ -789,6 +672,8 @@ public static class ILStackVisualizer
             }
             dupPipingIndexes.Clear();
 
+            int extraIndent = indent - pramsToConsume.Count;
+
             if (popped > 0 && !instruction.StackReset && !instruction.IsExceptionHandlerLead) // The instruction leading an exeption handler consumes a value pushed by the CLR externally to the method (dont try to trace it)
             {
                 pramsToConsume.Add(new(pramsToConsume.Count + 1 + extraIndent, popped, SourcePos: pos, isBranch, IsBranchInput: false));
@@ -817,7 +702,6 @@ public static class ILStackVisualizer
                     branchInfo: null, isBranch: false, branchChannel: 0, indent + 1,
                     branchInputChannelIndex: -1, canLinkToBranchInput: false, branchInputMaxSourcePosToLinkWith: -1, valuesPushedOntoBranch: 0, reach: 0, isBranchTarget, targetInfo);
                 pipes[i].Insert(0, $"    {sb3}");
-                //sb3.Append("─┐");
                 items.Add(new(0, 0, branchTargetChannelIndex + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry, so will be printed above it
 
                 if (branchTargetChannelIndexToRemove >= 0)
@@ -857,9 +741,6 @@ public static class ILStackVisualizer
             }
         }
 
-        int maxDigits = Math.Max(0, maxDepth.ToString().Length);
-        //int maxPosDigits = entries.Count > 0 ? Math.Max(0, entries[^1].Instruction.Position.ToString().Length) : 0;
-
         for (int i = items.Count - 1; i >= 0; i--)
         {
             var (dep, pos, indent, str, isBranchTarget) = items[i];
@@ -876,18 +757,11 @@ public static class ILStackVisualizer
         }
     }
 
-    private static string InstructionToString(MethodInfo baseMethod, Instruction instruction)
+    private static string InstructionToString(Instruction instruction)
     {
         // If next target is unconditional branch, use "┤" instead?
         string or = (instruction.OpCode == OpCodes.Or) ? "┘" : ""; // Only has two letters so otherwise looks broken when connecting pipes (pipes connect to the third letter)
-        return $"{instruction.OpCode}{or}{instruction.Text}{FormatOperand(BasicILScanner.GetOperand(baseMethod, instruction))}";
-    }
-
-    private static string InstructionToString(MetadataReader reader, Instruction instruction)
-    {
-        // If next target is unconditional branch, use "┤" instead?
-        string or = (instruction.OpCode == OpCodes.Or) ? "┘" : ""; // Only has two letters so otherwise looks broken when connecting pipes (pipes connect to the third letter)
-        return $"{instruction.OpCode}{or}{instruction.Text}{FormatOperand(BasicILScanner.GetOperand(reader, instruction.OpCode, instruction.OperandIL))}";
+        return $"{instruction.OpCode}{or}{instruction.Text}{FormatOperand(instruction.Operand)}";
     }
 
     private static string? FormatOperand(object? operand)
