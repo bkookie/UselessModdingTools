@@ -6,7 +6,7 @@ namespace UselessModdingTools.IL;
 //internal readonly record struct StackEntry(int DepthAfter, Instruction Instruction);
 
 internal readonly record struct Item(int Depth, int Pos, int Indent, string Text, bool IsBranchTarget);
-internal readonly record struct Params(int Indent, int RemainingParams);
+internal readonly record struct Params(int Indent, int RemainingParams); // RemainingParams is dual purpose; when negative, instead is the mapkey of a branchTarget channel
 
 public static class ILStackVisualizer
 {
@@ -20,7 +20,7 @@ public static class ILStackVisualizer
         if ($"{baseMethod.DeclaringType}.{baseMethod.Name}".StartsWith(debugMethod))
             ;
 
-        if (!BasicILScanner.TryReadIL(baseMethod, out var instructions, out var branchTargets))
+        if (!BasicILScanner.TryReadIL(baseMethod, out List<Instruction>? instructions, out Dictionary<int, TargetData>? branchTargets))
             return $"Error: Could not read method '{baseMethod.Name}'.\n";
 
         //Ignore branching for now
@@ -106,7 +106,7 @@ public static class ILStackVisualizer
 
                 bool isBranch = false;
                 int branchChannel = 0;
-                int branchCount = 0;
+                int remainingBranchCount = 0;
                 int branchChannelIndex = 0;
                 Params? channelToRemove = null;
                 Params? channelToInsert = null;
@@ -115,15 +115,22 @@ public static class ILStackVisualizer
                     // Need to route the pipes to the target
                     //pushed = instruction.SwitchTargets?.Length ?? (instruction.Target.HasValue ? 1 : 0);
 
-                    int targetPos = instruction.Branch.Value.Target;
+                    int targetPos = instruction.Branch.Value.TargetInfo.Target;
 
-                    if (branchTargets.TryGetValue(targetPos, out TargetInfo? info))
+                    if (branchTargets.TryGetValue(targetPos, out TargetData? targetData))
                     {
                         isBranch = true;
                         branchChannel = GetChannel(branchMaps, targetPos, ref channelId);
-                        branchCount = info.Count;
-                        info.Count--;
-                        if (info.Count == 0)
+                        if (instruction.Branch.Value.SwitchTargets != null)
+                        {
+                            targetData.Count -= instruction.Branch.Value.SwitchTargets.Count(b => b.Target == targetPos); // InlineSwitch may have multiple branches for the same target
+                        }
+                        else
+                        {
+                            targetData.Count--;
+                        }
+                        remainingBranchCount = targetData.Count;
+                        if (targetData.Count == 0)
                         {
                             channelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams == branchChannel);
                             if (channelIndex >= 0)
@@ -134,15 +141,13 @@ public static class ILStackVisualizer
                             else
                             {
 #warning need to create backwards loops
-#warning need to handle switch
-
                             }
                         }
                     }
                 }
 
                 if (pushed > 0 && pramsToConsume.Count > 0
-                    && (i == pramsToConsume.Count - 1 || !BasicILScanner.IsUnconditionalBranch(instructions[i + 1].OpCode))) // Cannot push because they do not pop
+                    && (i == pramsToConsume.Count - 1 || !BasicILScanner.IsUnconditionalNonPoppingBranch(instructions[i + 1].OpCode))) // Cannot push because they do not pop
                 {
                     int lastIndex = pramsToConsume.Count - 1;
                     for (int j = 0; j < pushed; j++)
@@ -174,7 +179,7 @@ public static class ILStackVisualizer
                 //Item? branchItem = null;
                 channelIndex = 0;
                 Params? branchParams = null;
-                if (branchTargets.TryGetValue(pos, out TargetInfo? targetInfo) && targetInfo.Count > 0)
+                if (branchTargets.TryGetValue(pos, out TargetData? targetInfo) && targetInfo.Count > 0)
                 {
                     // Calculate but dont edit anything until this instruction has been processed (cant upset the channels)
 
@@ -237,7 +242,7 @@ public static class ILStackVisualizer
 
                 StringBuilder sb2 = new();
                 sb2.Append("    ");
-                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, isBranch, branchChannel, branchCount, indent, isBranchTarget: false);
+                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, instruction.Branch, isBranch, branchChannel, remainingBranchCount, indent, isBranchTarget: false);
                 int extraIndent = indent - pramsToConsume.Count;
                 if (!pramsToConsume.Any(p => p.RemainingParams >= 0))
                 {
@@ -247,8 +252,18 @@ public static class ILStackVisualizer
                 }
                 sb2.Append(InstructionToString(baseMethod, instruction));
 
-                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, bool isBranch, int branchChannel, int branchCount, int branchIndent, bool isBranchTarget)
+                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, Branch? branchInfo, bool isBranch, int branchChannel, int remainingBranchCount, int branchIndent, bool isBranchTarget)
                 {
+                    Dictionary<int, TargetData> map = [];
+                    if (branchInfo.HasValue)
+                    {
+                        foreach (var b in branchInfo.Value)
+                        {
+                            map[branchMaps[b.Target]] = b.TargetData;
+                        }
+                        //map = branchInfo.Value.ToDictionary(b => branchMaps[b.Target], b => b.TargetData);
+                    }
+
                     bool linkedWithChannel = false;
                     for (int j = 0; j < pramsToConsume.Count; j++)
                     {
@@ -309,7 +324,7 @@ public static class ILStackVisualizer
                             else if (isBranch && branchChannel == prams.RemainingParams)
                             {
                                 linkedWithChannel = true;
-                                if (branchCount == 1)
+                                if (remainingBranchCount == 0)
                                     sb2.Append("┌───");
                                 else
                                     sb2.Append("├───");
@@ -343,7 +358,32 @@ public static class ILStackVisualizer
                             }
                             else if (linkedWithChannel && (isBranch || isBranchTarget))
                             {
-                                sb2.Append("│───");
+                                if (map != null && map.TryGetValue(prams.RemainingParams, out TargetData? targetData))
+                                {
+                                    // This should only trigger on inlineswitch
+                                    if (branchInfo != null && branchInfo.Value.SwitchTargets != null)
+                                    {
+                                        targetData.Count -= branchInfo.Value.SwitchTargets.Count(b => b.Target == targetData.Target); // InlineSwitch may have multiple branches for the same target
+                                    }
+                                    else
+                                    {
+                                        targetData.Count--;
+                                    }
+
+                                    if (targetData.Count == 0)
+                                    {
+                                        pramsToConsume[j] = pramsToConsume[j] with { RemainingParams = 0 };
+                                        sb2.Append("┬───");
+                                    }
+                                    else
+                                    {
+                                        sb2.Append("┼───");
+                                    }
+                                }
+                                else
+                                {
+                                    sb2.Append("│───");
+                                }
                             }
                             else if (isBranchTarget && branchMaps.TryGetValue(pos, out int channel) && channel == prams.RemainingParams)
                             {
@@ -404,7 +444,7 @@ public static class ILStackVisualizer
                     }
                     StringBuilder sb3 = new();
                     sb3.Append("    ");
-                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, isBranch: false, 0, 0, indent + 1, isBranchTarget);
+                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, null, isBranch: false, 0, 0, indent + 1, isBranchTarget);
                     //sb3.Append("─┐");
                     items.Add(new(0, 0, channelIndex + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry
                 }
@@ -471,7 +511,7 @@ public static class ILStackVisualizer
             if (branchTarget.SwitchTargets != null)
                 return $" >> [{string.Join(", ", branchTarget.SwitchTargets.Select(i => i.ToString()))}]"; // Should not hit, should be a Switch object
 
-            return $" >> {branchTarget.Target}";
+            return $" >> {branchTarget.TargetInfo}";
         }
 
         return $" {operand}";

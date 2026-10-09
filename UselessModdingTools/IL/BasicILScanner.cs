@@ -1,4 +1,5 @@
-﻿using System.ComponentModel;
+﻿using System.Collections;
+using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -7,10 +8,38 @@ namespace UselessModdingTools.IL;
 
 public readonly record struct Instruction(OpCode OpCode, byte[] OperandIL, string? Text, int Position, int Depth, Branch? Branch, bool IsExceptionHandlerLead);
 
-public readonly record struct Branch(int Position, int Target, int[]? SwitchTargets);
-//public readonly record struct Switch(object? Operand, int[] Targets);
+public readonly record struct Branch(int Position, BranchInfo TargetInfo, BranchInfo[]? SwitchTargets) : IEnumerable<BranchInfo>
+{
+    public IEnumerator<BranchInfo> GetEnumerator()
+    {
+        if (SwitchTargets != null)
+        {
+            foreach (BranchInfo target in SwitchTargets)
+            {
+                yield return target;
+            }
+        }
+        else
+        {
+            yield return TargetInfo;
+        }
+    }
 
-public record class TargetInfo(int Count, int IncomingDepth) { public int Count { get; set; } = Count; public int IncomingDepth { get; set; } = IncomingDepth; }
+    IEnumerator IEnumerable.GetEnumerator()
+    {
+        return GetEnumerator();
+    }
+
+    public override readonly string ToString()
+    {
+#warning implement
+        return base.ToString();
+    }
+}
+
+public readonly record struct BranchInfo(int Target, TargetData TargetData) { public override readonly string ToString() => Target.ToString(); }
+
+public record class TargetData(int Target, int Count, int IncomingDepth) { public int Count { get; set; } = Count; public int IncomingDepth { get; set; } = IncomingDepth; }
 
 public static class BasicILScanner
 {
@@ -39,7 +68,7 @@ public static class BasicILScanner
         }
     }
 
-    public static bool TryReadIL(MethodInfo baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
+    public static bool TryReadIL(MethodInfo baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetData>? branchTargets)
     {
         MethodBody? methodBody = baseMethod.GetMethodBody();
         byte[]? il = methodBody?.GetILAsByteArray();
@@ -101,7 +130,7 @@ public static class BasicILScanner
                             }
                         }
                     }
-                    if (!exeption && branchTargets.TryGetValue(p, out TargetInfo? info))
+                    if (!exeption && branchTargets.TryGetValue(p, out TargetData? info))
                     {
                         depth = info.IncomingDepth;
                     }
@@ -116,28 +145,40 @@ public static class BasicILScanner
             Branch? branch = default;
             if (IsBranch(op))
             {
-                int targetPos = GetRawTargetOfBranch(op, il, pos, out int[]? switchTargets);
+                int targetPos = GetRawTargetOfBranch(op, il, pos, out int[]? switchTargets); // Returns the highest target for switches
+                BranchInfo branchInfo = default;
+                BranchInfo[]? branchInfos = null;
+
+                if (switchTargets != null && switchTargets.Length == 0)
+                    throw new InvalidOperationException("Internal logic error");
 
                 if (switchTargets == null)
                 {
-                    AddTarget(branchTargets, targetPos, depth);
+                    AddTarget(branchTargets, targetPos, depth, out TargetData targetData);
+                    branchInfo = new(targetPos, targetData);
                 }
                 else
                 {
-                    foreach (int tar in switchTargets)
+                    branchInfos = new BranchInfo[switchTargets.Length];
+                    for (int i = 0; i < switchTargets.Length; i++)
                     {
-                        AddTarget(branchTargets, tar, depth);
+                        int tar = switchTargets[i];
+                        AddTarget(branchTargets, tar, depth, out TargetData targetData);
+                        branchInfos[i] = new(tar, targetData);
+
+                        if (tar == targetPos)
+                            branchInfo = new(tar, targetData);
                     }
                 }
 
-                branch = new(pos, targetPos, switchTargets);
+                branch = new(pos, branchInfo, branchInfos);
             }
 
-            static void AddTarget(Dictionary<int, TargetInfo> branchTargets, int targetPos, int depth)
+            static void AddTarget(Dictionary<int, TargetData> branchTargets, int targetPos, int depth, out TargetData targetInfo)
             {
-                if (!branchTargets.TryGetValue(targetPos, out TargetInfo? info)) // Target depth takes the max of all incoming branch depths (but i think they should all be the same?)
+                if (!branchTargets.TryGetValue(targetPos, out TargetData? info)) // Target depth takes the max of all incoming branch depths (but i think they should all be the same?)
                 {
-                    info = new(1, depth);
+                    info = new(targetPos, 1, depth);
                     branchTargets[targetPos] = info;
                 }
                 else
@@ -148,6 +189,7 @@ public static class BasicILScanner
                         info.IncomingDepth = depth;
                     }
                 }
+                targetInfo = info;
             }
 
             instructions.Add(new(op, operand, text, p, depth, branch, exeption));
@@ -222,10 +264,15 @@ public static class BasicILScanner
     public static bool IsUnconditionalBranch(OpCode op) =>
         op == OpCodes.Br
         || op == OpCodes.Br_S
-        || op.OperandType == OperandType.InlineSwitch
+        || op == OpCodes.Switch
         || op == OpCodes.Leave
         || op == OpCodes.Leave_S;
-    // Also leave/leave.s, but these are specialized
+
+    public static bool IsUnconditionalNonPoppingBranch(OpCode op) =>
+        op == OpCodes.Br
+        || op == OpCodes.Br_S
+        || op == OpCodes.Leave
+        || op == OpCodes.Leave_S;
 
     public static object? GetOperand(MethodInfo baseMethod, Instruction instruction)
     {
@@ -339,7 +386,7 @@ public static class BasicILScanner
                         int offset = BitConverter.ToInt32(il, pos + 4 + i * 4);
                         switchTargets[i] = baseAddr + offset;
                     }
-                    return switchTargets[0];
+                    return switchTargets.Max();
                 }
         }
 
