@@ -172,6 +172,7 @@ public static class ILStackVisualizer
                 }
 
                 int reach = 0;
+                TargetInfo? targetInfo = null;
                 if (pushed > 0 && pramsToConsume.Count > 0
                     && (i == pramsToConsume.Count - 1 || !BasicILScanner.IsUnconditionalNonPoppingBranch(instructions[i + 1].OpCode))) // Cannot push onto unconditional branch because they do not pop (aside from inline switches)
                 {
@@ -193,7 +194,13 @@ public static class ILStackVisualizer
                                 lastIndex = k;
                             }
                             Params tempPrams = pramsToConsume[k];
-                            pramsToConsume[k] = tempPrams with { RemainingParams = tempPrams.RemainingParams - 1 };
+                            int pushedAmount = 1;
+                            if (j == 0 && instruction.StackReset && branchTargets.TryGetValue(pos, out targetInfo) && targetInfo.IncomingDepth < instruction.Depth)
+                            {
+                                // The incoming branch is not a parameter to it's target, rather it brings sibling parameter(s) alongside it's target
+                                pushedAmount += targetInfo.IncomingDepth;
+                            }
+                            pramsToConsume[k] = tempPrams with { RemainingParams = tempPrams.RemainingParams - pushedAmount };
                         }
                     }
                 }
@@ -208,7 +215,7 @@ public static class ILStackVisualizer
                 int branchTargetChannelIndexToRemove = -1;
                 bool insertChannel = false; // if false, an empty channel was found
                 Params? newBranchParams = null;
-                if (branchTargets.TryGetValue(pos, out TargetInfo? targetInfo))
+                if (targetInfo != null || branchTargets.TryGetValue(pos, out targetInfo))
                 {
                     isBranchTarget = true;
                     int branchTargetChannel = GetChannel(branchMaps, pos, ref channelId); // channels are negative
