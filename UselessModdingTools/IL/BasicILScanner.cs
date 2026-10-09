@@ -138,6 +138,13 @@ public static class BasicILScanner
         branchTargets = [];
         int size;
 
+        bool prevInstructionIsUnconditionalBranch = false;
+
+        List<ExceptionRegion> exRegions = [.. body.ExceptionRegions];
+        exRegions.Sort((x, y) => x.HandlerOffset.CompareTo(y.HandlerOffset));
+        int nextExHandlerIndex = 0;
+        ExceptionRegion? nextExRegion = nextExHandlerIndex < exRegions.Count ? exRegions[nextExHandlerIndex++] : null;
+
         for (int pos = 0; pos < bodyIL.Length; pos += size)
         {
             int p = pos;
@@ -150,48 +157,44 @@ public static class BasicILScanner
             size = OperandSize(pos, op, bodyIL);
 
             byte[] il = bodyIL[pos..(pos + size)];
-            int depth = 0;
+            int depth;
             string? text = null;
             bool stackReset = false;
             bool exeption = false;
-            if (instructions.Count > 0)
+
+            if (p == nextExRegion?.HandlerOffset)
             {
-                OpCode prevOpCode = instructions[^1].OpCode;
-                if (IsUnconditionalBranch(prevOpCode))
+                stackReset = true;
+                exeption = true;
+
+                if (nextExRegion.Value.Kind == ExceptionRegionKind.Catch || nextExRegion.Value.Kind == ExceptionRegionKind.Filter)
                 {
-                    stackReset = true;
-
-#warning check clausess directly; less error prone
-                    if (prevOpCode == OpCodes.Leave || prevOpCode == OpCodes.Leave_S) // Exception handling
-                    {
-                        foreach (ExceptionRegion exRegion in body.ExceptionRegions)
-                        {
-                            if (exRegion.HandlerOffset == p)
-                            {
-                                exeption = true;
-
-                                if (exRegion.Kind == ExceptionRegionKind.Catch || exRegion.Kind == ExceptionRegionKind.Filter)
-                                {
-                                    // Compiler clears the stack, then pushes the exeption onto the stack externally
-                                    depth = 1;
-                                    text += $" [{exRegion.CatchType}]" ?? " [Exception]";
-                                }
-                                else
-                                {
-                                    depth = 0;
-                                }
-                            }
-                        }
-                    }
-                    if (!exeption && branchTargets.TryGetValue(p, out TargetInfo? info))
-                    {
-                        depth = info.IncomingDepth;
-                    }
+                    depth = 1; // Compiler clears the stack, then pushes the exeption onto the stack externally
+                    text += $" [Exception Handler]";
                 }
                 else
                 {
-                    depth = instructions[^1].Depth;
+                    depth = 0; // Compiler clears the stack
                 }
+
+                nextExRegion = (nextExHandlerIndex < exRegions.Count) ? exRegions[nextExHandlerIndex++] : null;
+            }
+            else if (prevInstructionIsUnconditionalBranch)
+            {
+                stackReset = true;
+
+                if (branchTargets.TryGetValue(p, out TargetInfo? info))
+                    depth = info.IncomingDepth;
+                else
+                    depth = 0;
+            }
+            else if (instructions.Count == 0)
+            {
+                depth = 0;
+            }
+            else
+            {
+                depth = instructions[^1].Depth;
             }
 
             depth += NetStackDepth(reader, mdef, op, il, out int push, out int pop);
@@ -229,6 +232,7 @@ public static class BasicILScanner
                 }
 
                 branch = new(pos, info, switchInfo);
+                prevInstructionIsUnconditionalBranch = IsUnconditionalBranch(op);
 
                 static void AddTarget(Dictionary<int, TargetInfo> branchTargets, int targetPos, int depth, out TargetInfo info)
                 {
@@ -247,6 +251,10 @@ public static class BasicILScanner
                     }
                     info = targetInfo;
                 }
+            }
+            else
+            {
+                prevInstructionIsUnconditionalBranch = false;
             }
 
             object? operand = (branch != null)
@@ -631,7 +639,7 @@ public static class BasicILScanner
     private static int MethodPopDepth(MethodSignature<int> sig, OpCode op)
     {
         if (op == OpCodes.Ret)
-            return -sig.ReturnType; // special case
+            return sig.ReturnType; // special case
 
         int pop = sig.ParameterTypes.Length;
 
