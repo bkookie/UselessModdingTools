@@ -117,6 +117,23 @@ public static class ILStackVisualizer
 
                     int targetPos = instruction.Branch.Value.TargetInfo.Target;
 
+                    if (instruction.Branch.Value.SwitchTargets != null)
+                    {
+                        // Find the left-most channel this inline switch will link with
+                        for (int n = pramsToConsume.Count - 1; n >= 0; n--)
+                        {
+                            Params pram = pramsToConsume[n];
+                            foreach (TargetInfo inf in instruction.Branch.Value)
+                            {
+                                if (pram.RemainingParams == branchMaps[inf.Target])
+                                {
+                                    targetPos = inf.Target;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
                     if (branchTargets.TryGetValue(targetPos, out TargetInfo? info))
                     {
                         isBranch = true;
