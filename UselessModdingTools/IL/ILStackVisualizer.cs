@@ -237,6 +237,7 @@ public static class ILStackVisualizer
                 int remainingPush = pushed;
                 int posLastPushedTo = -1; // Any branches encountered at or before this position can be traversed
                 bool foundBranch = false;
+                int conditionalBranchTargetPos = -1;
                 List<Params> sortedParams = [.. pramsToConsume];
                 sortedParams.Sort(Comparer<Params>.Create((x, y) =>
                 {
@@ -269,6 +270,20 @@ public static class ILStackVisualizer
                         {
                             foundBranch = true;
                             valuesPushedOntoBranch = remainingPush;
+                        }
+                    }
+
+                    // Cannot pass an unconditional branch unless it can bunny hop from a conditional branch
+                    if (BasicILScanner.IsBranch(pram.SourceInstruction.OpCode) && conditionalBranchTargetPos < pram.SourceInstruction.Position)
+                    {
+                        if (BasicILScanner.IsUnconditionalBranch(pram.SourceInstruction.OpCode))
+                        {
+                            if (branchInputMaxSourcePosToLinkWith <= pram.SourceInstruction.Position)
+                                break;
+                        }
+                        else if (pram.SourceInstruction.Branch != null)
+                        {
+                            conditionalBranchTargetPos = pram.SourceInstruction.Branch.Value.TargetInfo.TargetPos;
                         }
                     }
                 }
@@ -334,7 +349,7 @@ public static class ILStackVisualizer
                         targetInfo.BranchCount--;
                         if (targetInfo.BranchCount == 0)
                         {
-                            newBranchParams = pramsToConsume[branchTargetChannelIndex] with { RemainingParams = 0, IsBranchInput = false };
+                            newBranchParams = pramsToConsume[branchTargetChannelIndex] with { RemainingParams = 0, IsBranchInput = false, FeedsFromBranchIndex = -1 };
                         }
                     }
                     else
@@ -397,6 +412,7 @@ public static class ILStackVisualizer
                 bool feedingDup = false;
                 bool reached = false;
                 bool feedingBranchToChannel = false;
+                bool noLongerFeedingBranchToChannel = false;
                 int feedingFromChannelIndex = -1;
                 for (int j = 0; j < pramsToConsume.Count; j++)
                 {
@@ -414,7 +430,7 @@ public static class ILStackVisualizer
                                     else
                                         sb2.Append("┌───");
                                 }
-                                else if (feedingToBranchInput || feedingDup)
+                                else if (feedingToBranchInput || feedingDup || feedingBranchToChannel)
                                 {
                                     sb2.Append("──┬─");
                                 }
@@ -430,7 +446,7 @@ public static class ILStackVisualizer
                                     if (canLinkToBranchInput && prams.SourceInstruction.Position > pos)
                                     {
                                         pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - pushed };
-                                        if (feedingToBranchInput || feedingDup || reached)
+                                        if (feedingToBranchInput || feedingDup || reached || feedingBranchToChannel)
                                         {
                                             if (prams.RemainingParams > 1)
                                                 sb2.Append("┼───");
@@ -458,7 +474,7 @@ public static class ILStackVisualizer
                                 {
                                     sb2.Append("└───");
                                 }
-                                else if (prams.RemainingParams < 0 && (feedingToBranchInput || feedingDup || reached))
+                                else if (prams.RemainingParams < 0 && (feedingToBranchInput || feedingDup || reached || feedingBranchToChannel))
                                 {
                                     sb2.Append("│───");
                                 }
@@ -473,7 +489,7 @@ public static class ILStackVisualizer
                             feedingDup = true;
                             if (prams.RemainingParams == 0)
                             {
-                                if (linkedWithChannel || feedingToBranchInput || reached)
+                                if (linkedWithChannel || feedingToBranchInput || reached || feedingBranchToChannel)
                                     sb2.Append("──┬─");
                                 else
                                     sb2.Append("  ┌─");
@@ -505,7 +521,7 @@ public static class ILStackVisualizer
                             else
                                 sb2.Append("├───");
                         }
-                        else if (prams.FeedsFromBranchIndex > 0 && branchMaps.TryGetValue(pos, out int channelId) && pramsToConsume[prams.FeedsFromBranchIndex].RemainingParams == channelId)
+                        else if (prams.FeedsFromBranchIndex >= 0 && branchMaps.TryGetValue(pos, out int channelId) && pramsToConsume[prams.FeedsFromBranchIndex].RemainingParams == channelId)
                         {
                             feedingFromChannelIndex = prams.FeedsFromBranchIndex;
                             numChannelsForBranchToFeed--;
@@ -521,19 +537,27 @@ public static class ILStackVisualizer
                                     if (numChannelsForBranchToFeed > 0)
                                         sb2.Append("──┬─");
                                     else
-                                        sb2.Append("──┐");
+                                    {
+                                        sb2.Append("──┬─");
+                                        noLongerFeedingBranchToChannel = true;
+                                        //feedingBranchToChannel = false;
+                                        //feedingFromChannelIndex = -1;
+                                    }
                                 }
                                 else
                                 {
                                     if (numChannelsForBranchToFeed > 0)
                                         sb2.Append("└─┬─");
                                     else
-                                        sb2.Append("└─┐");
+                                    {
+                                        sb2.Append("└─┬─");
+                                    }
                                 }
                             }
-                            else if (numChannelsForBranchToFeed == 0)
+                            else if (j > feedingFromChannelIndex && numChannelsForBranchToFeed == 0)
                             {
-                                sb2.Append("──┐");
+                                sb2.Append("──┬─");
+                                noLongerFeedingBranchToChannel = true;
                             }
                             else
                             {
@@ -542,7 +566,7 @@ public static class ILStackVisualizer
                         }
                         else if (prams.RemainingParams == 0)
                         {
-                            if (linkedWithChannel && (isBranch || isBranchTarget) || feedingToBranchInput || feedingDup || reached)
+                            if (linkedWithChannel && (isBranch || isBranchTarget) || feedingToBranchInput || feedingDup || reached || feedingBranchToChannel)
                             {
                                 sb2.Append("────");
                             }
@@ -596,7 +620,7 @@ public static class ILStackVisualizer
                                             sb2.Append("┬───");
                                     }
                                 }
-                                else if (linkedWithChannel || feedingToBranchInput || feedingDup || reached)
+                                else if (linkedWithChannel || feedingToBranchInput || feedingDup || reached || feedingBranchToChannel)
                                 {
                                     sb2.Append("│───");
                                 }
@@ -630,11 +654,18 @@ public static class ILStackVisualizer
                             }
                             else
                             {
-                                if (feedingToBranchInput || feedingDup || reached)
+                                if (feedingToBranchInput || feedingDup || reached || feedingBranchToChannel)
                                     sb2.Append("──│─");
                                 else
                                     sb2.Append("  │ ");
                             }
+                        }
+                        else if (feedingBranchToChannel)
+                        {
+                            if (feedingFromChannelIndex == j)
+                                sb2.Append("┴───");
+                            else
+                                sb2.Append("│───");
                         }
                         else if (linkedWithChannel && (isBranch || isBranchTarget) || feedingToBranchInput)
                         {
@@ -668,27 +699,21 @@ public static class ILStackVisualizer
                         }
                         else if (isBranchTarget && branchMaps.TryGetValue(pos, out int channel) && channel == prams.RemainingParams)
                         {
-                            if (feedingFromChannelIndex == j)
+                            linkedWithChannel = true;
+                            if (branchTargetInfo != null && branchTargetInfo.BackBranches > 0)
                             {
-                                if (numChannelsForBranchToFeed > 0)
-                                    sb2.Append("┴───");
-                                else if (feedingBranchToChannel)
-                                    sb2.Append('┘');
+                                if (branchTargetInfo.BranchCount == 0)
+                                    sb2.Append("┌───");
+                                else
+                                    sb2.Append("├───");
+                            }
+                            else if (feedingDup)
+                            {
+                                sb2.Append("┴───");
                             }
                             else
                             {
-                                linkedWithChannel = true;
-                                if (branchTargetInfo != null && branchTargetInfo.BackBranches > 0)
-                                {
-                                    if (branchTargetInfo.BranchCount == 0)
-                                        sb2.Append("┌───");
-                                    else
-                                        sb2.Append("├───");
-                                }
-                                else if (feedingDup)
-                                    sb2.Append("┴───");
-                                else
-                                    sb2.Append("└───");
+                                sb2.Append("└───");
                             }
                         }
                         else if (reached && prams.RemainingParams < 0)
@@ -712,14 +737,28 @@ public static class ILStackVisualizer
                 {
                     if (isBranch || isBranchTarget)
                     {
-                        if (feedingBranchToChannel)
-                            break;
-
                         // No more channels on the stack, so need to manually pipe across to the label
                         if (isBranchTarget && i == remainingBranchTargetIndent - 1)
-                            sb2.Append("─┐");
+                        {
+                            if (!noLongerFeedingBranchToChannel)
+                                sb2.Append("─┐");
+
+                            if (branchTargetInfo != null && branchTargetInfo.IncomingDepth > 0)
+                            {
+                                if (noLongerFeedingBranchToChannel)
+                                    sb2.Append(">>");
+                                else
+                                    sb2.Append(" >>");
+
+                                int incomingStack = branchTargetInfo.IncomingDepth - popped;
+                                if (incomingStack > 0)
+                                    sb2.Append(' ').Append(incomingStack);
+                            }
+                        }
                         else
+                        {
                             sb2.Append("────");
+                        }
                     }
                     else if (!reached && reach > 0)
                     {
@@ -856,7 +895,7 @@ public static class ILStackVisualizer
 
         if (operand is Branch branchTarget)
         {
-            return $" >> {branchTarget}";
+            return $" << {branchTarget}";
         }
 
         return $" {operand}";
