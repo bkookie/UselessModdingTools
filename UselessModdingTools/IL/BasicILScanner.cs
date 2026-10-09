@@ -10,6 +10,8 @@ public readonly record struct Instruction(OpCode OpCode, byte[] OperandIL, strin
 public readonly record struct Branch(int Position, int Target, int[]? SwitchTargets);
 //public readonly record struct Switch(object? Operand, int[] Targets);
 
+public record class TargetInfo(int Count, int IncomingDepth) { public int Count { get; set; } = Count; public int IncomingDepth { get; set; } = IncomingDepth; }
+
 public static class BasicILScanner
 {
     public static Dictionary<OpCode, OpCode> StoreLoadReciprocals { get; set; }
@@ -37,7 +39,7 @@ public static class BasicILScanner
         }
     }
 
-    public static bool TryReadIL(MethodInfo baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, int>? branchTargets)
+    public static bool TryReadIL(MethodInfo baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
     {
         MethodBody? methodBody = baseMethod.GetMethodBody();
         byte[]? il = methodBody?.GetILAsByteArray();
@@ -78,7 +80,7 @@ public static class BasicILScanner
                 OpCode opCode = instructions[^1].OpCode;
                 if (IsUnconditionalBranch(opCode))
                 {
-                    if (opCode == OpCodes.Leave || opCode == OpCodes.Leave_S)
+                    if (opCode == OpCodes.Leave || opCode == OpCodes.Leave_S) // Exception handling
                     {
                         foreach (ExceptionHandlingClause clause in methodBody.ExceptionHandlingClauses)
                         {
@@ -99,9 +101,9 @@ public static class BasicILScanner
                             }
                         }
                     }
-                    if (!exeption && branchTargets.TryGetValue(p, out int dep))
+                    if (!exeption && branchTargets.TryGetValue(p, out TargetInfo? info))
                     {
-                        depth = dep;
+                        depth = info.IncomingDepth;
                     }
                 }
                 else
@@ -131,11 +133,20 @@ public static class BasicILScanner
                 branch = new(pos, targetPos, switchTargets);
             }
 
-            static void AddTarget(Dictionary<int, int> branchTargets, int targetPos, int depth)
+            static void AddTarget(Dictionary<int, TargetInfo> branchTargets, int targetPos, int depth)
             {
-                if (!branchTargets.TryGetValue(targetPos, out int maxDepth) || depth > maxDepth) // Target depth takes the max of all incoming branch depths
+                if (!branchTargets.TryGetValue(targetPos, out TargetInfo? info)) // Target depth takes the max of all incoming branch depths (but i think they should all be the same?)
                 {
-                    branchTargets[targetPos] = depth;
+                    info = new(1, depth);
+                    branchTargets[targetPos] = info;
+                }
+                else
+                {
+                    info.Count++;
+                    if (depth > info.IncomingDepth)
+                    {
+                        info.IncomingDepth = depth;
+                    }
                 }
             }
 

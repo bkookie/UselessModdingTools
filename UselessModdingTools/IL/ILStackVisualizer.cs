@@ -5,7 +5,7 @@ namespace UselessModdingTools.IL;
 
 //internal readonly record struct StackEntry(int DepthAfter, Instruction Instruction);
 
-internal readonly record struct Item(int Depth, int Pos, int Indent, string Text);
+internal readonly record struct Item(int Depth, int Pos, int Indent, string Text, bool IsBranchTarget);
 internal readonly record struct Params(int Indent, int RemainingParams);
 
 public static class ILStackVisualizer
@@ -82,15 +82,18 @@ public static class ILStackVisualizer
                 ;
 
             int maxIndent = 0;
+            int channelId = 0; // Provides a unique id for channel mapping
             List<Params> pramsToConsume = [];
             List<Item> items = [];
-            List<int> dupIndexes = []; // used for opcodes that push multiple values (eg dup)
+            List<int> dupPipingIndexes = []; // used for opcodes that push multiple values (eg dup)
+            Dictionary<int, int> branchMaps = [];
             for (int i = instructions.Count - 1; i >= 0; i--)
             {
                 Params? topStack = pramsToConsume.LastOrDefault();
 
                 //StackEntry entry = entries[i];
                 Instruction instruction = instructions[i];
+                int pos = instruction.Position;
                 object? operand = BasicILScanner.GetOperand(baseMethod, instruction);
                 MethodBase? calledMethod = operand as MethodBase;
                 int pushed = BasicILScanner.PushDepth(instruction.OpCode, baseMethod, calledMethod);
@@ -99,29 +102,65 @@ public static class ILStackVisualizer
                 int indent = pramsToConsume.Count;
                 int remainingPrams = topStack.HasValue ? topStack.Value.RemainingParams : -1;
                 bool nonContributor = false;
+                int channelIndex = 0;
 
-                if (BasicILScanner.IsBranch(instruction.OpCode))
+                bool isBranch = false;
+                int branchChannel = 0;
+                int branchCount = 0;
+                int branchChannelIndex = 0;
+                Params? channelToRemove = null;
+                Params? channelToInsert = null;
+                if (BasicILScanner.IsBranch(instruction.OpCode) && instruction.Branch != null)
                 {
                     // Need to route the pipes to the target
                     //pushed = instruction.SwitchTargets?.Length ?? (instruction.Target.HasValue ? 1 : 0);
+
+                    int targetPos = instruction.Branch.Value.Target;
+
+                    if (branchTargets.TryGetValue(targetPos, out TargetInfo? info))
+                    {
+                        isBranch = true;
+                        branchChannel = GetChannel(branchMaps, targetPos, ref channelId);
+                        branchCount = info.Count;
+                        info.Count--;
+                        if (info.Count == 0)
+                        {
+                            channelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams == branchChannel);
+                            if (channelIndex >= 0)
+                            {
+                                branchChannelIndex = channelIndex;
+                                channelToRemove = pramsToConsume[channelIndex] with { RemainingParams = 0 };
+                            }
+                            else
+                            {
+#warning need to create backwards loops
+#warning need to handle switch
+
+                            }
+                        }
+                    }
                 }
 
-                if (pushed > 0 && pramsToConsume.Count > 0)
+                if (pushed > 0 && pramsToConsume.Count > 0
+                    && (i == pramsToConsume.Count - 1 || !BasicILScanner.IsUnconditionalBranch(instructions[i + 1].OpCode))) // Cannot push because they do not pop
                 {
                     int lastIndex = pramsToConsume.Count - 1;
                     for (int j = 0; j < pushed; j++)
                     {
                         int k = pramsToConsume.FindLastIndex(lastIndex, p => p.RemainingParams > 0);
-                        if (k != pramsToConsume.Count - 1)
+                        if (k >= 0)
                         {
-                            for (int l = k; l <= lastIndex; l++)
+                            if (k != pramsToConsume.Count - 1)
                             {
-                                dupIndexes.Add(l);
+                                for (int l = k; l <= lastIndex; l++)
+                                {
+                                    dupPipingIndexes.Add(l);
+                                }
+                                lastIndex = k;
                             }
-                            lastIndex = k;
+                            Params tempPrams = pramsToConsume[k];
+                            pramsToConsume[k] = tempPrams with { RemainingParams = tempPrams.RemainingParams - 1 };
                         }
-                        Params tempPrams = pramsToConsume[k];
-                        pramsToConsume[k] = tempPrams with { RemainingParams = tempPrams.RemainingParams - 1 };
                     }
                 }
                 else if (pramsToConsume.Count > 0 && pramsToConsume.LastOrDefault().Indent == pramsToConsume.Count)
@@ -130,78 +169,244 @@ public static class ILStackVisualizer
                     nonContributor = true;
                 }
 
+                bool isBranchTarget = false;
+                bool insertChannel = false;
+                //Item? branchItem = null;
+                channelIndex = 0;
+                Params? branchParams = null;
+                if (branchTargets.TryGetValue(pos, out TargetInfo? targetInfo) && targetInfo.Count > 0)
+                {
+                    // Calculate but dont edit anything until this instruction has been processed (cant upset the channels)
+
+                    isBranchTarget = true;
+
+                    int channel = GetChannel(branchMaps, pos, ref channelId); // channels are negative
+                    channelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams == channel);
+                    //int channelIndent;
+
+                    if (channelIndex != -1)
+                    {
+                        //throw new InvalidOperationException("This target already mapped???");
+
+                        targetInfo.Count--;
+                        if (targetInfo.Count == 0)
+                        {
+                            //pramsToConsume[channelIndex] = pramsToConsume[channelIndex] with { RemainingParams = 0 };
+                            branchParams = pramsToConsume[channelIndex] with { RemainingParams = 0 };
+                        }
+                    }
+                    else
+                    {
+                        channelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams == 0);
+
+                        if (channelIndex != -1)
+                        {
+                            //pramsToConsume[channelIndex] = pramsToConsume[channelIndex] with { RemainingParams = channel };
+                            branchParams = pramsToConsume[channelIndex] with { RemainingParams = channel };
+                        }
+                        else
+                        {
+                            channelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams < 0) + 1;
+                            //if (channelIndex == -1) channelIndex = 0;
+                            branchParams = new Params(channelIndex + 1, channel);
+                            insertChannel = true;
+                            //pramsToConsume.Insert(channelIndex, new Params(channelIndex + 1, channel));
+                        }
+
+                        if (channelIndex == indent) // while <= indent?
+                            indent++;
+
+                        //channelIndent = channelIndex + 1;
+                    }
+
+                    //if (pramsToConsume.Count >= 2 && pramsToConsume[^2].RemainingParams == 0)
+                    //{
+                    //    pramsToConsume[^2] = pramsToConsume[^2] with { RemainingParams = -channel };
+                    //}
+                    //else
+                    //{
+                    //    pramsToConsume.Insert(0, new Params(indent, -channel));
+                    //    //indent++;
+                    //}
+                    //StringBuilder sb3 = new();
+                    //sb3.Append("    ");
+                    //PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, false);
+                    //sb3.Append("─┐");
+                    //branchItem = new(0, 0, channelIndex + 1, sb3.ToString());
+                }
+
                 StringBuilder sb2 = new();
                 sb2.Append("    ");
-
-                for (int j = 0; j < pramsToConsume.Count; j++)
+                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, isBranch, branchChannel, branchCount, indent, isBranchTarget: false);
+                int extraIndent = indent - pramsToConsume.Count;
+                if (!pramsToConsume.Any(p => p.RemainingParams >= 0))
                 {
-                    Params prams = pramsToConsume[j];
-                    if (prams.Indent == j + 1)
+                    // For ret in particular. Need to indent the instruction when it is sitting drectly in the channel of the incoming branch pipe (the pipe needs room to do a little dog leg)
+                    for (int m = 0; m < extraIndent; m++)
+                        sb2.Append("    ");
+                }
+                sb2.Append(InstructionToString(baseMethod, instruction));
+
+                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, bool isBranch, int branchChannel, int branchCount, int branchIndent, bool isBranchTarget)
+                {
+                    bool linkedWithChannel = false;
+                    for (int j = 0; j < pramsToConsume.Count; j++)
                     {
-                        if (j == pramsToConsume.Count - 1 && !nonContributor)
+                        Params prams = pramsToConsume[j];
+                        if (prams.Indent == j + 1)
                         {
-                            if (prams.RemainingParams == 0)
+                            if (j == pramsToConsume.Count - 1 && !nonContributor)
                             {
-                                if (dupIndexes.Contains(j))
+                                if (prams.RemainingParams == 0)
                                 {
-                                    sb2.Append("──┬─");
+                                    if (dupPipingIndexes.Contains(j))
+                                    {
+                                        sb2.Append("──┬─");
+                                    }
+                                    else
+                                    {
+                                        sb2.Append("  ┌─");
+                                    }
                                 }
                                 else
                                 {
-                                    sb2.Append("  ┌─");
+                                    if (dupPipingIndexes.Contains(j))
+                                    {
+                                        sb2.Append("──┼─"); // Impossible?
+                                    }
+                                    else if (prams.RemainingParams > 0)
+                                    {
+                                        sb2.Append("  ├─");
+                                    }
+                                    else if (isBranchTarget && branchMaps.TryGetValue(pos, out int channel) && channel == prams.RemainingParams)
+                                    {
+                                        sb2.Append("└───");
+                                    }
+                                    else
+                                    {
+                                        sb2.Append("────");
+                                    }
                                 }
                             }
-                            else
+                            else if (dupPipingIndexes.Contains(j))
                             {
-                                if (dupIndexes.Contains(j))
+                                if (prams.RemainingParams == 0)
                                 {
-                                    sb2.Append("──┼─"); // Impossible?
+                                    if (dupPipingIndexes.Contains(j - 1))
+                                    {
+                                        sb2.Append("────");
+                                    }
+                                    else
+                                    {
+                                        sb2.Append("  ┌─");
+                                    }
                                 }
                                 else
                                 {
                                     sb2.Append("  ├─");
                                 }
                             }
-                        }
-                        else if (dupIndexes.Contains(j))
-                        {
-                            if (prams.RemainingParams == 0)
+                            else if (isBranch && branchChannel == prams.RemainingParams)
                             {
-                                if (dupIndexes.Contains(j - 1))
-                                {
+                                linkedWithChannel = true;
+                                if (branchCount == 1)
+                                    sb2.Append("┌───");
+                                else
+                                    sb2.Append("├───");
+                            }
+                            else if (prams.RemainingParams == 0)
+                            {
+                                if (linkedWithChannel && (isBranch || isBranchTarget))
                                     sb2.Append("────");
+                                else
+                                    sb2.Append("    ");
+                            }
+                            else if (prams.RemainingParams > 0)
+                            {
+                                if (isBranch && linkedWithChannel)
+                                {
+                                    sb2.Append("──│─");
+                                }
+                                else if (isBranchTarget)
+                                {
+                                    if (branchIndent == prams.Indent)
+                                        sb2.Append("─┐│");
+                                    else if (linkedWithChannel)
+                                        sb2.Append("──│─");
+                                    else
+                                        sb2.Append("  │ ");
                                 }
                                 else
                                 {
-                                    sb2.Append("  ┌─");
+                                    sb2.Append("  │ ");
                                 }
+                            }
+                            else if (linkedWithChannel && (isBranch || isBranchTarget))
+                            {
+                                sb2.Append("│───");
+                            }
+                            else if (isBranchTarget && branchMaps.TryGetValue(pos, out int channel) && channel == prams.RemainingParams)
+                            {
+                                linkedWithChannel = true;
+                                sb2.Append("└───");
                             }
                             else
                             {
-                                sb2.Append("  ├─");
+                                sb2.Append("│   ");
                             }
-                        }
-                        else if (prams.RemainingParams == 0)
-                        {
-                            sb2.Append("    ");
                         }
                         else
                         {
-                            sb2.Append("  │ ");
+                            sb2.Append("    ");
                         }
                     }
-                    else
+
+                    if (isBranch || isBranchTarget)
                     {
-                        sb2.Append("    ");
+                        int remainingBranchTargetIndent = branchIndent - pramsToConsume.Count;
+                        for (int i = 0; i < remainingBranchTargetIndent; i++)
+                        {
+                            // No more channels on the stack, so need to manually pipe across to the label
+                            if (isBranchTarget && i == remainingBranchTargetIndent - 1)
+                                sb2.Append("─┐");
+                            else
+                                sb2.Append("────");
+                        }
                     }
                 }
-                dupIndexes.Clear();
+                dupPipingIndexes.Clear();
 
                 if (popped > 0 && !instruction.IsExceptionHandlerLead) // The instruction leading an exeption handler consumes a value pushed by the CLR externally to the method (dont try to trace it)
                 {
-                    pramsToConsume.Add(new(pramsToConsume.Count + 1, popped));
+                    pramsToConsume.Add(new(pramsToConsume.Count + 1 + extraIndent, popped));
                     if (pramsToConsume.Count > maxIndent)
                         maxIndent++;
+                }
+
+                items.Add(new(instruction.Depth, instruction.Position, indent, sb2.ToString(), false));
+
+                if (isBranch)
+                {
+                    if (channelToRemove != null)
+                    {
+                        pramsToConsume[branchChannelIndex] = channelToRemove.Value;
+                    }
+                }
+
+                if (isBranchTarget)
+                {
+                    if (branchParams != null)
+                    {
+                        if (insertChannel)
+                            pramsToConsume.Insert(channelIndex, branchParams.Value);
+                        else
+                            pramsToConsume[channelIndex] = branchParams.Value;
+                    }
+                    StringBuilder sb3 = new();
+                    sb3.Append("    ");
+                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, isBranch: false, 0, 0, indent + 1, isBranchTarget);
+                    //sb3.Append("─┐");
+                    items.Add(new(0, 0, channelIndex + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry
                 }
 
                 while (pramsToConsume.Count > 0 && pramsToConsume.LastOrDefault().RemainingParams == 0)
@@ -210,8 +415,14 @@ public static class ILStackVisualizer
                     pramsToConsume.RemoveLast();
                 }
 
-                sb2.Append(InstructionToString(baseMethod, instruction));
-                items.Add(new(instruction.Depth, instruction.Position, indent, sb2.ToString()));
+                static int GetChannel(Dictionary<int, int> map, int targetPos, ref int channelId)
+                {
+                    if (map.TryGetValue(targetPos, out int channel))
+                        return channel;
+
+                    map[targetPos] = --channelId; // Do not store zero here
+                    return channelId;
+                }
             }
 
             int maxDigits = Math.Max(0, maxDepth.ToString().Length);
@@ -219,11 +430,17 @@ public static class ILStackVisualizer
 
             for (int i = items.Count - 1; i >= 0; i--)
             {
-                var (dep, pos, indent, str) = items[i];
-                string depfth = dep.ToString().PadLeft(maxDigits);
-                //int digits = dept.Length;
+                var (dep, pos, indent, str, isBranchTarget) = items[i];
 
-                sb.AppendLine($"[{depfth}] <{pos.ToString(),3}>{str}");
+                if (isBranchTarget)
+                {
+                    sb.AppendLine($"{new string(' ', 2 + maxDigits + 1 + 2 + 4)}{str}");
+                }
+                else
+                {
+                    string depfth = dep.ToString().PadLeft(maxDigits);
+                    sb.AppendLine($"[{depfth}] <{pos.ToString(),4}>{str}");
+                }
             }
         }
 
