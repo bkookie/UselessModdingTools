@@ -45,6 +45,7 @@ public record class TargetInfo(int Target, int Count, int IncomingDepth)
 {
     public int Target { get; } = Target;
     public int Count { get; set; } = Count;
+    public int BackBranches { get; set; } = 0;
     public int IncomingDepth { get; set; } = IncomingDepth;
 
     public override string ToString()
