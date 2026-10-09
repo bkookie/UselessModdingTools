@@ -12,7 +12,7 @@ internal readonly record struct Item(int Depth, int Pos, int Indent, string Text
 //  - When negative, is the mapkey of a branchTarget channel
 //  - When positive and IsBranchInput = true, is a branch input channel, with value equal to the remaining stack size to traverse the branch
 //  - Otherwise when positve, value is the remaining stack size for the prior pop instruction
-internal readonly record struct Params(int Indent, int RemainingParams, int SourcePos, bool IsBranch, bool IsBranchInput);
+internal readonly record struct Params(int Indent, int RemainingParams, int SourcePos, bool IsBranch, bool IsBranchInput, int FeedsFromBranchIndex);
 
 public static class ILStackVisualizer
 {
@@ -186,7 +186,7 @@ public static class ILStackVisualizer
                         info.BackBranches += numBranchPathsToThisTarget;
 
                         int branchChannelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams < 0) + 1;
-                        pramsToConsume.Insert(branchChannelIndex, new(branchChannelIndex + 1, branchChannel, SourcePos: pos, isBranch, IsBranchInput: false));
+                        pramsToConsume.Insert(branchChannelIndex, new(branchChannelIndex + 1, branchChannel, SourcePos: pos, isBranch, IsBranchInput: false, FeedsFromBranchIndex: -1));
 
                         if (branchChannelIndex == indent)
                             indent++;
@@ -204,12 +204,12 @@ public static class ILStackVisualizer
 
                         if (branchInputChannelIndex >= 0 && branchInputChannelIndex > pramsToConsume.FindIndex(p => p.RemainingParams == branchChannel))
                         {
-                            pramsToConsume[branchInputChannelIndex] = new(branchInputChannelIndex + 1, instruction.Depth, SourcePos: pos, IsBranch: false, IsBranchInput: true);
+                            pramsToConsume[branchInputChannelIndex] = new(branchInputChannelIndex + 1, instruction.Depth, SourcePos: pos, IsBranch: false, IsBranchInput: true, FeedsFromBranchIndex: -1);
                         }
                         else
                         {
                             branchInputChannelIndex = pramsToConsume.Count;
-                            pramsToConsume.Add(new(branchInputChannelIndex + 1, instruction.Depth, SourcePos: pos, IsBranch: false, IsBranchInput: true));
+                            pramsToConsume.Add(new(branchInputChannelIndex + 1, instruction.Depth, SourcePos: pos, IsBranch: false, IsBranchInput: true, FeedsFromBranchIndex: -1));
                         }
 
                         if (branchInputChannelIndex == indent)
@@ -226,7 +226,8 @@ public static class ILStackVisualizer
             bool canLinkToBranchInput = false;
             int branchInputMaxSourcePosToLinkWith = -1;
             int valuesPushedOntoBranch = 0;
-            int reach = 0;
+            int reach = -1;
+            int carryOverPushAmount = 0;
             TargetInfo? targetInfo = null;
             if (pushed > 0 && pramsToConsume.Count > 0)
             {
@@ -275,7 +276,7 @@ public static class ILStackVisualizer
 
                 for (int j = 0; j < pushed; j++)
                 {
-                    // TODO: rework this to be more generic; just find which channels the pushed value(s) will link with. No need to worry about dup or reach
+                    // TODO: rework this to be more generic; just find which channels the pushed value(s) will link with. No need to worry about dup or reach (and do the same for incoming branches)
                     int k = pramsToConsume.FindLastIndex(lastIndex, p => p.RemainingParams > 0 && !p.IsBranchInput);
                     if (k >= 0)
                     {
@@ -292,7 +293,7 @@ public static class ILStackVisualizer
                         if (j == 0 && instruction.StackReset && branchTargets.TryGetValue(pos, out targetInfo))
                         {
                             // The incoming branch is not a parameter to it's target, rather it brings sibling parameter(s) alongside it's target
-                            pushedAmount += targetInfo.IncomingDepth - popped;
+                            carryOverPushAmount = targetInfo.IncomingDepth - popped;
                         }
                         pramsToConsume[k] = tempPrams with { RemainingParams = tempPrams.RemainingParams - pushedAmount };
                     }
@@ -342,25 +343,23 @@ public static class ILStackVisualizer
 
                         if (branchTargetChannelIndex != -1)
                         {
-                            newBranchParams = new(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, SourcePos: pos, IsBranch: false, IsBranchInput: false);
+                            newBranchParams = new(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, SourcePos: pos, IsBranch: false, IsBranchInput: false, FeedsFromBranchIndex: -1);
                         }
                         else
                         {
+                            // Careful when inserting a channel, so as not to break alignments
+                            // Must Insert to the (current) end of the list (do not use Add). This way, if the instruction pops and adds a new channel, this will be inserted in front of it.
                             insertChannel = true;
-                            branchTargetChannelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams < 0 || p.RemainingParams > 0 && p.IsBranchInput) + 1;
-                            newBranchParams = new Params(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, SourcePos: pos, IsBranch: false, IsBranchInput: false);
-                            // Careful when inserting a channel, so as not to break alignments; maybe should always just add to the end.
-                            // Will leave the code as is to find where it breaks, or until I can confirm the correct handling.
-
-                            if (branchTargetChannelIndex < pramsToConsume.Count)
-                            {
-                                throw new InvalidOperationException($"DEBUG: Inserting a channel (may break alignments). Probably indicates incorrect handling of an opcode. " +
-                                    $"MethodName = '{methodName}', OpCode = '{instruction.OpCode}', Position = '0x{pos:X4} ({pos})'".AsErrorMsg());
-                            }
+                            branchTargetChannelIndex = pramsToConsume.Count;
+                            newBranchParams = new Params(Indent: branchTargetChannelIndex + 1, RemainingParams: branchTargetChannel, SourcePos: pos, IsBranch: false, IsBranchInput: false, FeedsFromBranchIndex: -1);
                         }
 
                         if (branchTargetChannelIndex == indent)
+                        {
                             indent++;
+                            if (reach >= 0)
+                                reach++;
+                        }
                     }
                 }
             }
@@ -369,13 +368,15 @@ public static class ILStackVisualizer
             sb2.Append("    ");
             PrintPipes(sb2, pos, instruction.Depth, popped, pushed, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor,
                 instruction.Branch, isBranch, branchChannel, indent,
-                branchInputChannelIndex, canLinkToBranchInput, branchInputMaxSourcePosToLinkWith, valuesPushedOntoBranch, reach, isBranchTarget: false, null);
+                branchInputChannelIndex, canLinkToBranchInput, branchInputMaxSourcePosToLinkWith, valuesPushedOntoBranch,
+                reach, isBranchTarget: false, null, numChannelsForBranchToFeed: 0);
             pipes.Add(i, [$"[{instruction.Depth.ToString().PadLeft(maxDigits)}] <{pos,4}> {sb2}"]);
             sb2.Append(InstructionToString(instruction));
 
             static void PrintPipes(StringBuilder sb2, int pos, int depth, int popped, int pushed, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor,
                 Branch? branchInfo, bool isBranch, int branchChannel, int branchIndent,
-                int branchInputChannelIndex, bool canLinkToBranchInput, int branchInputMaxSourcePosToLinkWith, int valuesPushedOntoBranch, int reach, bool isBranchTarget, TargetInfo? branchTargetInfo)
+                int branchInputChannelIndex, bool canLinkToBranchInput, int branchInputMaxSourcePosToLinkWith, int valuesPushedOntoBranch,
+                int reach, bool isBranchTarget, TargetInfo? branchTargetInfo, int numChannelsForBranchToFeed)
             {
                 // TODO: dont mutate state in here; should just print and nothing else.
 
@@ -395,6 +396,8 @@ public static class ILStackVisualizer
                 bool feedingToBranchInput = false;
                 bool feedingDup = false;
                 bool reached = false;
+                bool feedingBranchToChannel = false;
+                int feedingFromChannelIndex = -1;
                 for (int j = 0; j < pramsToConsume.Count; j++)
                 {
                     Params prams = pramsToConsume[j];
@@ -470,7 +473,7 @@ public static class ILStackVisualizer
                             feedingDup = true;
                             if (prams.RemainingParams == 0)
                             {
-                                if (feedingToBranchInput || reached)
+                                if (linkedWithChannel || feedingToBranchInput || reached)
                                     sb2.Append("──┬─");
                                 else
                                     sb2.Append("  ┌─");
@@ -502,17 +505,56 @@ public static class ILStackVisualizer
                             else
                                 sb2.Append("├───");
                         }
+                        else if (prams.FeedsFromBranchIndex > 0 && branchMaps.TryGetValue(pos, out int channelId) && pramsToConsume[prams.FeedsFromBranchIndex].RemainingParams == channelId)
+                        {
+                            feedingFromChannelIndex = prams.FeedsFromBranchIndex;
+                            numChannelsForBranchToFeed--;
+                            if (!feedingBranchToChannel)
+                            {
+                                feedingBranchToChannel = true;
+                                if (j < prams.FeedsFromBranchIndex)
+                                {
+                                    sb2.Append("  ┌─");
+                                }
+                                else if (j > prams.FeedsFromBranchIndex)
+                                {
+                                    if (numChannelsForBranchToFeed > 0)
+                                        sb2.Append("──┬─");
+                                    else
+                                        sb2.Append("──┐");
+                                }
+                                else
+                                {
+                                    if (numChannelsForBranchToFeed > 0)
+                                        sb2.Append("└─┬─");
+                                    else
+                                        sb2.Append("└─┐");
+                                }
+                            }
+                            else if (numChannelsForBranchToFeed == 0)
+                            {
+                                sb2.Append("──┐");
+                            }
+                            else
+                            {
+                                sb2.Append("──┬─");
+                            }
+                        }
                         else if (prams.RemainingParams == 0)
                         {
                             if (linkedWithChannel && (isBranch || isBranchTarget) || feedingToBranchInput || feedingDup || reached)
+                            {
                                 sb2.Append("────");
+                            }
                             else if (reach > 0 && prams.Indent == pramsToConsume.Count - reach)
                             {
                                 reached = true;
                                 sb2.Append("  ┌─");
                             }
                             else
+                            {
                                 sb2.Append("    ");
+                            }
                         }
                         else if (prams.RemainingParams > 0)
                         {
@@ -611,7 +653,7 @@ public static class ILStackVisualizer
 
                                 if (targetInfo.BranchCount == 0)
                                 {
-                                    pramsToConsume[j] = pramsToConsume[j] with { RemainingParams = 0, IsBranchInput = false };
+                                    pramsToConsume[j] = pramsToConsume[j] with { RemainingParams = 0, IsBranchInput = false, FeedsFromBranchIndex = -1 };
                                     sb2.Append("┬───");
                                 }
                                 else
@@ -626,16 +668,28 @@ public static class ILStackVisualizer
                         }
                         else if (isBranchTarget && branchMaps.TryGetValue(pos, out int channel) && channel == prams.RemainingParams)
                         {
-                            linkedWithChannel = true;
-                            if (branchTargetInfo != null && branchTargetInfo.BackBranches > 0)
+                            if (feedingFromChannelIndex == j)
                             {
-                                if (branchTargetInfo.BranchCount == 0)
-                                    sb2.Append("┌───");
-                                else
-                                    sb2.Append("├───");
+                                if (numChannelsForBranchToFeed > 0)
+                                    sb2.Append("┴───");
+                                else if (feedingBranchToChannel)
+                                    sb2.Append('┘');
                             }
                             else
-                                sb2.Append("└───");
+                            {
+                                linkedWithChannel = true;
+                                if (branchTargetInfo != null && branchTargetInfo.BackBranches > 0)
+                                {
+                                    if (branchTargetInfo.BranchCount == 0)
+                                        sb2.Append("┌───");
+                                    else
+                                        sb2.Append("├───");
+                                }
+                                else if (feedingDup)
+                                    sb2.Append("┴───");
+                                else
+                                    sb2.Append("└───");
+                            }
                         }
                         else if (reached && prams.RemainingParams < 0)
                         {
@@ -658,25 +712,33 @@ public static class ILStackVisualizer
                 {
                     if (isBranch || isBranchTarget)
                     {
+                        if (feedingBranchToChannel)
+                            break;
+
                         // No more channels on the stack, so need to manually pipe across to the label
                         if (isBranchTarget && i == remainingBranchTargetIndent - 1)
                             sb2.Append("─┐");
                         else
                             sb2.Append("────");
                     }
+                    else if (!reached && reach > 0)
+                    {
+                        sb2.Append("────");
+                    }
                     else
                     {
                         sb2.Append("    ");
                     }
                 }
+
+                dupPipingIndexes.Clear();
             }
-            dupPipingIndexes.Clear();
 
             int extraIndent = indent - pramsToConsume.Count;
 
             if (popped > 0 && !instruction.StackReset && !instruction.IsExceptionHandlerLead) // The instruction leading an exeption handler consumes a value pushed by the CLR externally to the method (dont try to trace it)
             {
-                pramsToConsume.Add(new(pramsToConsume.Count + 1 + extraIndent, popped, SourcePos: pos, isBranch, IsBranchInput: false));
+                pramsToConsume.Add(new(pramsToConsume.Count + 1 + extraIndent, popped, SourcePos: pos, isBranch, IsBranchInput: false, FeedsFromBranchIndex: -1));
                 if (pramsToConsume.Count > maxIndent)
                     maxIndent++;
             }
@@ -684,29 +746,46 @@ public static class ILStackVisualizer
 
             if (isBranch && branchChannelIndexToRemove >= 0)
             {
-                pramsToConsume[branchChannelIndexToRemove] = pramsToConsume[branchChannelIndexToRemove] with { RemainingParams = 0, IsBranchInput = false };
+                pramsToConsume[branchChannelIndexToRemove] = pramsToConsume[branchChannelIndexToRemove] with { RemainingParams = 0, IsBranchInput = false, FeedsFromBranchIndex = -1 };
             }
 
             if (isBranchTarget)
             {
-                if (newBranchParams != null && branchTargetChannelIndex >= 0)
+                if (newBranchParams != null)
                 {
                     if (insertChannel)
                         pramsToConsume.Insert(branchTargetChannelIndex, newBranchParams.Value);
                     else
                         pramsToConsume[branchTargetChannelIndex] = newBranchParams.Value;
                 }
+
+                int numChannelsForBranchToFeed = 0;
+                if (carryOverPushAmount > 0)
+                {
+                    for (int j = pramsToConsume.Count - 1; j >= 0 && carryOverPushAmount > 0; j--)
+                    {
+                        Params prams = pramsToConsume[j];
+                        if (prams.RemainingParams > 0 && !prams.IsBranchInput)
+                        {
+                            int push = Math.Min(carryOverPushAmount, prams.RemainingParams);
+                            pramsToConsume[j] = prams with { RemainingParams = prams.RemainingParams - push, FeedsFromBranchIndex = branchTargetChannelIndex };
+                            numChannelsForBranchToFeed++;
+                            carryOverPushAmount -= push;
+                        }
+                    }
+                }
+
                 StringBuilder sb3 = new();
                 sb3.Append("    ");
                 PrintPipes(sb3, pos, instruction.Depth, popped: 0, pushed: 0, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor: true,
                     branchInfo: null, isBranch: false, branchChannel: 0, indent + 1,
-                    branchInputChannelIndex: -1, canLinkToBranchInput: false, branchInputMaxSourcePosToLinkWith: -1, valuesPushedOntoBranch: 0, reach: 0, isBranchTarget, targetInfo);
+                    branchInputChannelIndex: -1, canLinkToBranchInput: false, branchInputMaxSourcePosToLinkWith: -1, valuesPushedOntoBranch: 0, reach: 0, isBranchTarget, targetInfo, numChannelsForBranchToFeed);
                 pipes[i].Insert(0, $"    {sb3}");
-                items.Add(new(0, 0, branchTargetChannelIndex + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry, so will be printed above it
+                items.Add(new(0, 0, indent + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry, so will be printed above it
 
                 if (branchTargetChannelIndexToRemove >= 0)
                 {
-                    pramsToConsume[branchTargetChannelIndexToRemove] = pramsToConsume[branchTargetChannelIndexToRemove] with { RemainingParams = 0, IsBranchInput = false };
+                    pramsToConsume[branchTargetChannelIndexToRemove] = pramsToConsume[branchTargetChannelIndexToRemove] with { RemainingParams = 0, IsBranchInput = false, FeedsFromBranchIndex = -1 };
                 }
             }
 
