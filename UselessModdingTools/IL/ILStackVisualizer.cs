@@ -22,8 +22,13 @@ internal readonly record struct Params(int Indent, int RemainingParams, int Sour
 
 public static class ILStackVisualizer
 {
-    public static string ReadMethod(MethodInfo baseMethod, VisualizerMode mode)
+    public static string ReadMethod(MethodInfo baseMethod, VisualizerMode mode, out SortedList<int, List<string>>? pipes)
     {
+        pipes = null;
+
+        if (baseMethod == null)
+            return "";
+
         if (baseMethod.DeclaringType?.Namespace?.StartsWith("Godot") == true)
             return "";
 
@@ -104,6 +109,7 @@ public static class ILStackVisualizer
             List<Item> items = [];
             List<int> dupPipingIndexes = []; // used for opcodes that push multiple values (eg dup)
             Dictionary<int, int> branchMaps = []; // Key = TargetPos, Value = ChannelId
+            pipes = new(instructions.Count);
             for (int i = instructions.Count - 1; i >= 0; i--)
             {
                 Params? topStack = pramsToConsume.LastOrDefault();
@@ -358,6 +364,7 @@ public static class ILStackVisualizer
                 PrintPipes(sb2, pos, instruction.Depth, popped, pushed, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor,
                     instruction.Branch, isBranch, branchChannel, indent,
                     branchInputChannelIndex, canLinkToBranchInput, branchInputMaxSourcePosToLinkWith, valuesPushedOntoBranch, reach, isBranchTarget: false, null);
+                pipes.Add(i, [$"[{instruction.Depth}] {sb2}"]);
                 sb2.Append(InstructionToString(baseMethod, instruction));
                 int extraIndent = indent - pramsToConsume.Count;
 
@@ -687,6 +694,7 @@ public static class ILStackVisualizer
                     PrintPipes(sb3, pos, instruction.Depth, popped: 0, pushed: 0, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor: true,
                         branchInfo: null, isBranch: false, branchChannel: 0, indent + 1,
                         branchInputChannelIndex: -1, canLinkToBranchInput: false, branchInputMaxSourcePosToLinkWith: -1, valuesPushedOntoBranch: 0, reach: 0, isBranchTarget, targetInfo);
+                    pipes[i].Insert(0, $"    {sb3}");
                     //sb3.Append("─┐");
                     items.Add(new(0, 0, branchTargetChannelIndex + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry, so will be printed above it
 
@@ -695,6 +703,21 @@ public static class ILStackVisualizer
                         pramsToConsume[branchTargetChannelIndexToRemove] = pramsToConsume[branchTargetChannelIndexToRemove] with { RemainingParams = 0, IsBranchInput = false };
                     }
                 }
+
+                // Provide continuation piping (for when adding extra line gaps between instructions, but want piping to remain contigous)
+                StringBuilder sb4 = new();
+                sb4.Append("    ");
+                for (int n = 0; n < pramsToConsume.Count; n++)
+                {
+                    Params prams = pramsToConsume[n];
+                    if (prams.RemainingParams == 0)
+                        sb4.Append("    ");
+                    else if (prams.RemainingParams < 0 || prams.IsBranchInput)
+                        sb4.Append("│   ");
+                    else
+                        sb4.Append("  │ ");
+                }
+                pipes[i].Insert(0, $"    {sb4}");
 
                 while (pramsToConsume.Count > 0 && pramsToConsume.LastOrDefault().RemainingParams == 0)
                 {
