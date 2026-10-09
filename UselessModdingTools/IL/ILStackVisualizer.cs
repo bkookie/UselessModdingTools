@@ -170,7 +170,7 @@ public static class ILStackVisualizer
                 if (branchTargets.TryGetValue(targetPos, out TargetInfo? info))
                 {
                     isBranch = true;
-                    branchChannel = GetChannel(branchMaps, targetPos, ref channelId);
+                    branchChannel = GetChannel(branchMaps, targetPos, ref channelId, out bool isNewChannel);
                     int numBranchPathsToThisTarget;
 
                     if (instruction.Branch.Value.SwitchTargets != null)
@@ -188,11 +188,14 @@ public static class ILStackVisualizer
                     {
                         info.BackBranches += numBranchPathsToThisTarget;
 
-                        int branchChannelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams < 0) + 1;
-                        pramsToConsume.Insert(branchChannelIndex, new(branchChannelIndex + 1, branchChannel, isBranch, IsBranchInput: false, FeedsFromBranchIndex: -1, SourceInstruction: instruction));
+                        if (isNewChannel)
+                        {
+                            int branchChannelIndex = pramsToConsume.FindLastIndex(p => p.RemainingParams < 0) + 1;
+                            pramsToConsume.Insert(branchChannelIndex, new(branchChannelIndex + 1, branchChannel, isBranch, IsBranchInput: false, FeedsFromBranchIndex: -1, SourceInstruction: instruction));
 
-                        if (branchChannelIndex == indent)
-                            indent++;
+                            if (branchChannelIndex == indent)
+                                indent++;
+                        }
                     }
                     else if (info.BranchCount == 0)
                     {
@@ -331,7 +334,7 @@ public static class ILStackVisualizer
             if (targetInfo != null || branchTargets.TryGetValue(pos, out targetInfo))
             {
                 isBranchTarget = true;
-                int branchTargetChannel = GetChannel(branchMaps, pos, ref channelId); // channels are negative
+                int branchTargetChannel = GetChannel(branchMaps, pos, ref channelId, out _); // channels are negative
 
                 if (targetInfo.BranchCount <= 0)
                 {
@@ -511,7 +514,12 @@ public static class ILStackVisualizer
                             if (map != null && map.TryGetValue(prams.RemainingParams, out TargetInfo? targetInfo))
                             {
                                 if (targetInfo.TargetPos < branchInfo.Value.Position)
-                                    sb2.Append("└───");
+                                {
+                                    if (targetInfo.BranchCount < targetInfo.BackBranches - 1) // -1 to exclude the current instruction
+                                        sb2.Append("├───");
+                                    else
+                                        sb2.Append("└───");
+                                }
                                 else if (targetInfo.BranchCount == 0)
                                     sb2.Append("┌───");
                                 else
@@ -881,11 +889,15 @@ public static class ILStackVisualizer
                 pramsToConsume.RemoveLast();
             }
 
-            static int GetChannel(Dictionary<int, int> map, int targetPos, ref int channelId)
+            static int GetChannel(Dictionary<int, int> map, int targetPos, ref int channelId, out bool isNewChannel)
             {
                 if (map.TryGetValue(targetPos, out int channel))
+                {
+                    isNewChannel = false;
                     return channel;
+                }
 
+                isNewChannel = true;
                 map[targetPos] = --channelId; // Do not store zero here
                 return channelId;
             }
