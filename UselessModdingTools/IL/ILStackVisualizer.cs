@@ -171,6 +171,7 @@ public static class ILStackVisualizer
                     channelIndexToRemove = pramsToConsume.FindLastIndex(p => p.RemainingParams == channel);
                 }
 
+                int reach = 0;
                 if (pushed > 0 && pramsToConsume.Count > 0
                     && (i == pramsToConsume.Count - 1 || !BasicILScanner.IsUnconditionalNonPoppingBranch(instructions[i + 1].OpCode))) // Cannot push because they do not pop
                 {
@@ -180,7 +181,10 @@ public static class ILStackVisualizer
                         int k = pramsToConsume.FindLastIndex(lastIndex, p => p.RemainingParams > 0);
                         if (k >= 0)
                         {
-                            if (k != pramsToConsume.Count - 1)
+                            if (pushed == 1)
+                                reach = lastIndex - k; // How many indent levels the pushed value needs to stretch across (usually 0)
+
+                            if (j > 0)
                             {
                                 for (int l = k; l <= lastIndex; l++)
                                 {
@@ -254,11 +258,11 @@ public static class ILStackVisualizer
 
                 StringBuilder sb2 = new();
                 sb2.Append("    ");
-                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, instruction.Branch, isBranch, branchChannel, indent, isBranchTarget: false, null);
+                PrintPipes(sb2, pos, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor, instruction.Branch, isBranch, branchChannel, indent, reach, isBranchTarget: false, null);
                 sb2.Append(InstructionToString(baseMethod, instruction));
                 int extraIndent = indent - pramsToConsume.Count;
 
-                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, Branch? branchInfo, bool isBranch, int branchChannel, int branchIndent, bool isBranchTarget, TargetInfo? branchTargetInfo)
+                static void PrintPipes(StringBuilder sb2, int pos, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor, Branch? branchInfo, bool isBranch, int branchChannel, int branchIndent, int reach, bool isBranchTarget, TargetInfo? branchTargetInfo)
                 {
                     Dictionary<int, TargetInfo>? map = null;
                     if (branchInfo.HasValue)
@@ -273,6 +277,7 @@ public static class ILStackVisualizer
                     }
 
                     bool linkedWithChannel = false;
+                    bool reached = false;
                     for (int j = 0; j < pramsToConsume.Count; j++)
                     {
                         Params prams = pramsToConsume[j];
@@ -304,6 +309,10 @@ public static class ILStackVisualizer
                                     else if (isBranchTarget && branchMaps.TryGetValue(pos, out int channel) && channel == prams.RemainingParams)
                                     {
                                         sb2.Append("└───");
+                                    }
+                                    else if (reached && prams.RemainingParams < 0)
+                                    {
+                                        sb2.Append("│───");
                                     }
                                     else
                                     {
@@ -373,6 +382,11 @@ public static class ILStackVisualizer
                                     else
                                         sb2.Append("  │ ");
                                 }
+                                else if (reach > 0 && prams.Indent == pramsToConsume.Count - reach)
+                                {
+                                    reached = true;
+                                    sb2.Append("  ├─");
+                                }
                                 else
                                 {
                                     sb2.Append("  │ ");
@@ -420,6 +434,10 @@ public static class ILStackVisualizer
                                 }
                                 else
                                     sb2.Append("└───");
+                            }
+                            else if (reached && prams.RemainingParams < 0)
+                            {
+                                sb2.Append("│───");
                             }
                             else
                             {
@@ -476,7 +494,7 @@ public static class ILStackVisualizer
                     }
                     StringBuilder sb3 = new();
                     sb3.Append("    ");
-                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, null, isBranch: false, 0, indent + 1, isBranchTarget, targetInfo);
+                    PrintPipes(sb3, pos, pramsToConsume, dupPipingIndexes, branchMaps, true, null, isBranch: false, branchChannel: 0, indent + 1, reach: 0, isBranchTarget, targetInfo);
                     //sb3.Append("─┐");
                     items.Add(new(0, 0, branchTargetChannelIndex + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry
 
