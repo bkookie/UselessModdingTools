@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -8,13 +9,14 @@ namespace UselessModdingTools.IL;
 
 public readonly record struct Instruction(OpCode OpCode, byte[] OperandIL, string? Text, int Position, int Depth, Branch? Branch, bool IsExceptionHandlerLead);
 
-public readonly record struct Branch(int Position, BranchInfo TargetInfo, BranchInfo[]? SwitchTargets) : IEnumerable<BranchInfo>
+[DebuggerDisplay("Position = {Position,nq}, Target = {ToString(),nq}")]
+public readonly record struct Branch(int Position, TargetInfo TargetInfo, TargetInfo[]? SwitchTargets) : IEnumerable<TargetInfo>
 {
-    public IEnumerator<BranchInfo> GetEnumerator()
+    public IEnumerator<TargetInfo> GetEnumerator()
     {
         if (SwitchTargets != null)
         {
-            foreach (BranchInfo target in SwitchTargets)
+            foreach (TargetInfo target in SwitchTargets)
             {
                 yield return target;
             }
@@ -32,14 +34,24 @@ public readonly record struct Branch(int Position, BranchInfo TargetInfo, Branch
 
     public override readonly string ToString()
     {
-#warning implement
-        return base.ToString();
+        if (SwitchTargets != null)
+            return $"[{string.Join(", ", SwitchTargets.Select(tar => tar.Target.ToString()))}]"; // Should not hit, should be a Switch object
+
+        return TargetInfo.Target.ToString();
     }
 }
 
-public readonly record struct BranchInfo(int Target, TargetData TargetData) { public override readonly string ToString() => Target.ToString(); }
+public record class TargetInfo(int Target, int Count, int IncomingDepth)
+{
+    public int Target { get; } = Target;
+    public int Count { get; set; } = Count;
+    public int IncomingDepth { get; set; } = IncomingDepth;
 
-public record class TargetData(int Target, int Count, int IncomingDepth) { public int Count { get; set; } = Count; public int IncomingDepth { get; set; } = IncomingDepth; }
+    public override string ToString()
+    {
+        return $"Target = {Target}, Count = {Count}";
+    }
+}
 
 public static class BasicILScanner
 {
@@ -68,7 +80,7 @@ public static class BasicILScanner
         }
     }
 
-    public static bool TryReadIL(MethodInfo baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetData>? branchTargets)
+    public static bool TryReadIL(MethodInfo baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
     {
         MethodBody? methodBody = baseMethod.GetMethodBody();
         byte[]? il = methodBody?.GetILAsByteArray();
@@ -130,7 +142,7 @@ public static class BasicILScanner
                             }
                         }
                     }
-                    if (!exeption && branchTargets.TryGetValue(p, out TargetData? info))
+                    if (!exeption && branchTargets.TryGetValue(p, out TargetInfo? info))
                     {
                         depth = info.IncomingDepth;
                     }
@@ -146,50 +158,50 @@ public static class BasicILScanner
             if (IsBranch(op))
             {
                 int targetPos = GetRawTargetOfBranch(op, il, pos, out int[]? switchTargets); // Returns the highest target for switches
-                BranchInfo branchInfo = default;
-                BranchInfo[]? branchInfos = null;
+                TargetInfo info = null!;
+                TargetInfo[]? switchInfo = null;
 
                 if (switchTargets != null && switchTargets.Length == 0)
                     throw new InvalidOperationException("Internal logic error");
 
                 if (switchTargets == null)
                 {
-                    AddTarget(branchTargets, targetPos, depth, out TargetData targetData);
-                    branchInfo = new(targetPos, targetData);
+                    AddTarget(branchTargets, targetPos, depth, out TargetInfo targetInfo);
+                    info = targetInfo;
                 }
                 else
                 {
-                    branchInfos = new BranchInfo[switchTargets.Length];
+                    switchInfo = new TargetInfo[switchTargets.Length];
                     for (int i = 0; i < switchTargets.Length; i++)
                     {
                         int tar = switchTargets[i];
-                        AddTarget(branchTargets, tar, depth, out TargetData targetData);
-                        branchInfos[i] = new(tar, targetData);
+                        AddTarget(branchTargets, tar, depth, out TargetInfo targetInfo);
+                        switchInfo[i] = targetInfo;
 
                         if (tar == targetPos)
-                            branchInfo = new(tar, targetData);
+                            info = targetInfo;
                     }
                 }
 
-                branch = new(pos, branchInfo, branchInfos);
+                branch = new(pos, info, switchInfo);
             }
 
-            static void AddTarget(Dictionary<int, TargetData> branchTargets, int targetPos, int depth, out TargetData targetInfo)
+            static void AddTarget(Dictionary<int, TargetInfo> branchTargets, int targetPos, int depth, out TargetInfo info)
             {
-                if (!branchTargets.TryGetValue(targetPos, out TargetData? info)) // Target depth takes the max of all incoming branch depths (but i think they should all be the same?)
+                if (!branchTargets.TryGetValue(targetPos, out TargetInfo? targetInfo)) // Target depth takes the max of all incoming branch depths (but i think they should all be the same?)
                 {
-                    info = new(targetPos, 1, depth);
-                    branchTargets[targetPos] = info;
+                    targetInfo = new(targetPos, 1, depth);
+                    branchTargets[targetPos] = targetInfo;
                 }
                 else
                 {
-                    info.Count++;
-                    if (depth > info.IncomingDepth)
+                    targetInfo.Count++;
+                    if (depth > targetInfo.IncomingDepth)
                     {
-                        info.IncomingDepth = depth;
+                        targetInfo.IncomingDepth = depth;
                     }
                 }
-                targetInfo = info;
+                info = targetInfo;
             }
 
             instructions.Add(new(op, operand, text, p, depth, branch, exeption));
@@ -251,6 +263,12 @@ public static class BasicILScanner
         || op == OpCodes.Stloc_3
         || op == OpCodes.Stloc_S;
 
+    public static bool IsFieldAccess(OpCode op) =>
+        op == OpCodes.Stfld
+        || op == OpCodes.Stsfld
+        || op == OpCodes.Ldfld
+        || op == OpCodes.Ldsfld;
+
     public static bool IsCall(OpCode op) =>
         op == OpCodes.Call
         || op == OpCodes.Callvirt
@@ -297,7 +315,7 @@ public static class BasicILScanner
         {
             return GetStringFromIL(baseMethod.Module, il);
         }
-        else if (op == OpCodes.Ldfld || op == OpCodes.Stfld)
+        else if (IsFieldAccess(op))
         {
             int token = BitConverter.ToInt32(il, 0);
             return baseMethod.Module.ResolveField(token, baseMethod.DeclaringType?.GetGenericArguments(), baseMethod.GetGenericArguments());
