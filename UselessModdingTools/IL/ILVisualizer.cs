@@ -1,7 +1,10 @@
 ﻿using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
+using System.Runtime.InteropServices;
 using System.Text;
+
+using CdfgGraph = System.Collections.Generic.List<(int stackDepth, System.Collections.Generic.List<string> pipes)>; // For ILSpy interop (decompiler runs on netstandard2.0 and must use reflection, so cant share custom types)
 
 namespace UselessModdingTools.IL;
 
@@ -14,7 +17,7 @@ internal readonly record struct Item(int Depth, int Pos, int Indent, string Text
 //  - Otherwise when positve, value is the remaining stack size for the prior pop instruction
 internal readonly record struct Params(int Indent, int RemainingParams, bool IsBranch, bool IsBranchInput, int FeedsFromBranchIndex, Instruction SourceInstruction);
 
-public static class ILStackVisualizer
+public static class ILVisualizer
 {
 #if DEBUG
     public const string debugMethod = "UselessModdingTools.IL.BasicILScanner.TryReadILInternal";
@@ -22,8 +25,10 @@ public static class ILStackVisualizer
     private static string currentMethod = "";
 #endif
 
-    public static string ReadMethod(MethodInfo baseMethod, VisualizerMode mode, out SortedList<int, List<string>>? pipes)
+    public static string GraphMethod(MethodInfo baseMethod, GraphType graphType, out int maxOffset, out int maxStackDepth, out CdfgGraph? pipes)
     {
+        maxOffset = 0;
+        maxStackDepth = 0;
         pipes = null;
 
         if (baseMethod == null)
@@ -35,7 +40,7 @@ public static class ILStackVisualizer
         if (currentMethod.Contains(debugMethod))
             ;
 #endif
-        if (!BasicILScanner.TryReadIL(baseMethod, out int maxStackDepth, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
+        if (!BasicILScanner.TryReadIL(baseMethod, out maxOffset, out maxStackDepth, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
             return $"Error: Could not read method '{baseMethod.Name}'.\n";
 
         StringBuilder sb = new();
@@ -47,20 +52,22 @@ public static class ILStackVisualizer
         sb.Append("│ ").Append(sig).Append(new string(' ', len - sig.Length + 1)).AppendLine("│");
         sb.Append("└─").Append(new string('─', len)).AppendLine("─┘"); ;
 
-        if (mode == VisualizerMode.StackDepth)
+        if (graphType == GraphType.StackDepth)
         {
             GraphStackDepth();
         }
         else
         {
-            GraphCFG(sb, methodName, maxStackDepth, instructions, branchTargets, out pipes);
+            GraphCDFG(sb, methodName, maxStackDepth, instructions, branchTargets, out pipes);
         }
 
         return sb.ToString();
     }
 
-    public static string ReadMethod(MetadataReader reader, MethodDefinition mdef, MethodBodyBlock body, VisualizerMode mode, out SortedList<int, List<string>>? pipes)
+    public static string GraphMethod(MetadataReader reader, MethodDefinition mdef, MethodBodyBlock body, GraphType graphType, out int maxOffset, out int maxStackDepth, out CdfgGraph? pipes)
     {
+        maxOffset = 0;
+        maxStackDepth = body.MaxStack;
         pipes = null;
 
         string fullName = BasicILScanner.GetMethodFullName(reader, mdef);
@@ -69,7 +76,7 @@ public static class ILStackVisualizer
         if (debugMethod.Contains(currentMethod) || currentMethod.Contains(debugMethod))
             ;
 #endif
-        if (!BasicILScanner.TryReadIL(reader, mdef, body, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
+        if (!BasicILScanner.TryReadIL(reader, mdef, body, out maxOffset, out List<Instruction>? instructions, out Dictionary<int, TargetInfo>? branchTargets))
             return $"Error: Could not read method '{fullName}'.\n";
 
         StringBuilder sb = new();
@@ -81,13 +88,13 @@ public static class ILStackVisualizer
         sb.Append("│ ").Append(sig).Append(new string(' ', len - sig.Length + 1)).AppendLine("│");
         sb.Append("└─").Append(new string('─', len)).AppendLine("─┘"); ;
 
-        if (mode == VisualizerMode.StackDepth)
+        if (graphType == GraphType.StackDepth)
         {
             GraphStackDepth();
         }
         else
         {
-            GraphCFG(sb, fullName, body.MaxStack, instructions, branchTargets, out pipes);
+            GraphCDFG(sb, fullName, maxStackDepth, instructions, branchTargets, out pipes);
         }
 
         return sb.ToString();
@@ -106,7 +113,7 @@ public static class ILStackVisualizer
         //}
     }
 
-    private static void GraphCFG(StringBuilder sb, string methodName, int maxStackDepth, List<Instruction> instructions, Dictionary<int, TargetInfo> branchTargets, out SortedList<int, List<string>>? pipes)
+    private static void GraphCDFG(StringBuilder sb, string methodName, int maxStackDepth, List<Instruction> instructions, Dictionary<int, TargetInfo> branchTargets, out CdfgGraph? cdfgGraph)
     {
 #if DEBUG
         if (debugMethod.Contains(currentMethod) || currentMethod.Contains(debugMethod))
@@ -124,7 +131,8 @@ public static class ILStackVisualizer
         List<Item> items = [];
         List<int> dupPipingIndexes = []; // used for opcodes that push multiple values (eg dup)
         Dictionary<int, int> branchMaps = []; // Key = TargetPos, Value = ChannelId
-        pipes = new(instructions.Count);
+        cdfgGraph = new(instructions.Count);
+        CollectionsMarshal.SetCount(cdfgGraph, instructions.Count);
         for (int i = instructions.Count - 1; i >= 0; i--)
         {
             Instruction instruction = instructions[i];
@@ -393,7 +401,7 @@ public static class ILStackVisualizer
                 instruction.Branch, isBranch, branchChannel, indent,
                 branchInputChannelIndex, canLinkToBranchInput, branchInputMaxSourcePosToLinkWith, valuesPushedOntoBranch,
                 reach, isBranchTarget: false, null, numChannelsForBranchToFeed: 0);
-            pipes.Add(i, [$"[{instruction.Depth.ToString().PadLeft(maxStackDigits)}] <{pos.ToString().PadLeft(maxPosDigitsDecimal)}> {sb2}"]);
+            cdfgGraph[i] = (instruction.Depth, [sb2.ToString()]);
             sb2.Append(InstructionToString(instruction));
 
             static void PrintPipes(StringBuilder sb2, int pos, int depth, int popped, int pushed, List<Params> pramsToConsume, List<int> dupPipingIndexes, Dictionary<int, int> branchMaps, bool nonContributor,
@@ -833,7 +841,7 @@ public static class ILStackVisualizer
                 PrintPipes(sb3, pos, instruction.Depth, popped: 0, pushed: 0, pramsToConsume, dupPipingIndexes, branchMaps, nonContributor: true,
                     branchInfo: null, isBranch: false, branchChannel: 0, indent + 1,
                     branchInputChannelIndex: -1, canLinkToBranchInput: false, branchInputMaxSourcePosToLinkWith: -1, valuesPushedOntoBranch: 0, reach: 0, isBranchTarget, targetInfo, numChannelsForBranchToFeed);
-                pipes[i].Insert(0, $"{sb3}");
+                cdfgGraph[i].pipes.Insert(0, sb3.ToString());
                 items.Add(new(0, 0, indent + 1, sb3.ToString(), isBranchTarget)); // Add this after the main entry, so will be printed above it
 
                 if (branchTargetChannelIndexToRemove >= 0)
@@ -875,7 +883,7 @@ public static class ILStackVisualizer
                 else
                     sb4.Append("  │ ");
             }
-            pipes[i].Insert(0, $"{sb4}");
+            cdfgGraph[i].pipes.Insert(0, sb4.ToString());
 
             while (pramsToConsume.Count > 0 && pramsToConsume.LastOrDefault().RemainingParams == 0)
             {
@@ -942,10 +950,10 @@ public static class ILStackVisualizer
     }
 }
 
-public enum VisualizerMode
+public enum GraphType
 {
     StackDepth,
-    Parameters,
+    ControlAndDataFlow,
 }
 
 file static class Extensions

@@ -87,11 +87,12 @@ public static class BasicILScanner
         }
     }
 
-    public static bool TryReadIL(MethodInfo baseMethod, out int maxStackDepth, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
+    public static bool TryReadIL(MethodInfo baseMethod, out int maxOffset, out int maxStackDepth, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
     {
         string? file = baseMethod.DeclaringType?.Assembly.Location;
         if (string.IsNullOrEmpty(file))
         {
+            maxOffset = 0;
             maxStackDepth = 0;
             instructions = null;
             branchTargets = null;
@@ -109,26 +110,28 @@ public static class BasicILScanner
         {
             MethodBodyBlock body = peReader.GetMethodBody(mdef.RelativeVirtualAddress);
             maxStackDepth = body.MaxStack;
-            return TryReadILInternal(reader, mdef, body, baseMethod, out instructions, out branchTargets);
+            return TryReadILInternal(reader, mdef, body, baseMethod, out maxOffset, out instructions, out branchTargets);
         }
 
+        maxOffset = 0;
         maxStackDepth = 0;
         instructions = null;
         branchTargets = null;
         return false;
     }
 
-    public static bool TryReadIL(MetadataReader reader, MethodDefinition mdef, MethodBodyBlock body, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
+    public static bool TryReadIL(MetadataReader reader, MethodDefinition mdef, MethodBodyBlock body, out int maxOffset, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
     {
-        return TryReadILInternal(reader, mdef, body, null, out instructions, out branchTargets);
+        return TryReadILInternal(reader, mdef, body, null, out maxOffset, out instructions, out branchTargets);
     }
 
-    internal static bool TryReadILInternal(MetadataReader reader, MethodDefinition mdef, MethodBodyBlock body, MethodInfo? baseMethod, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
+    internal static bool TryReadILInternal(MetadataReader reader, MethodDefinition mdef, MethodBodyBlock body, MethodInfo? baseMethod, out int maxOffset, [NotNullWhen(true)] out List<Instruction>? instructions, [NotNullWhen(true)] out Dictionary<int, TargetInfo>? branchTargets)
     {
         byte[]? bodyIL = body.GetILBytes();
 
         if (bodyIL == null)
         {
+            maxOffset = 0;
             instructions = null;
             branchTargets = null;
             return false;
@@ -145,9 +148,11 @@ public static class BasicILScanner
         int nextExHandlerIndex = 0;
         ExceptionRegion? nextExRegion = nextExHandlerIndex < exRegions.Count ? exRegions[nextExHandlerIndex++] : null;
 
+        int p = 0;
+
         for (int pos = 0; pos < bodyIL.Length; pos += size)
         {
-            int p = pos;
+            p = pos;
 
             ushort code = bodyIL[pos++];
             if (code == 0xFE)
@@ -265,6 +270,8 @@ public static class BasicILScanner
 
             instructions.Add(new(p, op, il, operand, push, pop, text, depth, branch, stackReset, exeption));
         }
+
+        maxOffset = p;
         return true;
     }
 
